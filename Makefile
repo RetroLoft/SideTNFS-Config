@@ -11,13 +11,15 @@ CFLAGS     = -Wall -Wextra -O1 -m68000 -fno-strict-aliasing \
 LDFLAGS    = -s -lgem
 
 TARGET     = SIDETNFS.PRG
-SRCS       = src/main.c src/profile.c src/config.c src/dialog.c src/sidetnfs_probe.c
+SRCS       = src/main.c src/drive.c src/config.c src/dialog.c src/sidetnfs_probe.c
 INSTALLDIR = /mnt/retroloft/retro/Atari.ST/CONFIG
 
 # Files to copy on 'make install' (extend as the project grows)
 DISTFILES  = $(TARGET)
 
-all: $(TARGET)
+# 'all' always installs too: every successful build is copied straight
+# to the CONFIG share, no separate 'make install' step needed.
+all: $(TARGET) install
 
 $(TARGET): $(SRCS)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS) $(LDFLAGS)
