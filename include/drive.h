@@ -8,7 +8,12 @@
  * exchanged with the Pico without re-sizing. sd_path has no firmware
  * counterpart yet -- sized generously, not protocol-derived. */
 
-#define MAX_DRIVES       8
+/* Fase AC-4: the firmware's SIDETNFS_MAX_DRIVES (8) counts ORDINARY
+ * drives only -- the config drive is separate (just a letter, no slot
+ * index of its own). The UI array must hold both, so its capacity is
+ * one more than the firmware's ordinary-drive limit. */
+#define MAX_ORDINARY_DRIVES 8
+#define MAX_DRIVES           (MAX_ORDINARY_DRIVES + 1) /* + the config drive */
 
 #define DRIVE_NICK_LEN   24 /* 23 chars + NUL */
 #define DRIVE_HOST_LEN   64 /* 63 chars + NUL */
@@ -59,6 +64,12 @@ int drive_config_config_index(const DriveConfig *cfg);
  * any change that can affect a letter (add, edit, delete) so the
  * overview always lists drives in driveletter order. */
 void drive_config_sort_by_letter(DriveConfig *cfg);
+
+/* Count of `used` ordinary (non-CONFIG) drives -- excludes the config
+ * drive, matching SIDETNFS_MAX_DRIVES's own definition. Compare against
+ * MAX_ORDINARY_DRIVES, not MAX_DRIVES, when enforcing "max 8 ordinary
+ * drives". */
+int drive_config_ordinary_count(const DriveConfig *cfg);
 
 /* 1 if `letter` (already uppercased) is used by any drive other than
  * drives[skip_index] (pass -1 to check against all drives). */

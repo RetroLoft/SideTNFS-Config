@@ -43,6 +43,15 @@ void drive_config_sort_by_letter(DriveConfig *cfg)
     }
 }
 
+int drive_config_ordinary_count(const DriveConfig *cfg)
+{
+    int i, n = 0;
+    for (i = 0; i < cfg->drive_count; i++)
+        if (cfg->drives[i].used && cfg->drives[i].type != DRIVE_TYPE_CONFIG)
+            n++;
+    return n;
+}
+
 int drive_config_config_index(const DriveConfig *cfg)
 {
     int i;

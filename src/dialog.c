@@ -20,12 +20,12 @@
  */
 
 #include <gem.h>
+#include <mint/osbind.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "dialog.h"
 #include "drive.h"
-#include "config.h"
 #include "sidetnfs_probe.h"
 
 /* ================================================================== */
@@ -70,7 +70,7 @@ enum {
     TE_LBL_HOST,  TE_HOST_EDIT,
     TE_LBL_PORT,  TE_PORT_EDIT,
     TE_LBL_TRANSPORT, TE_TRANSPORT_VAL, TE_TRANSPORT_TCP,
-    TE_LBL_MOUNT, TE_MOUNT_EDIT,
+    TE_LBL_MOUNT, TE_MOUNT_EDIT, TE_MOUNT_HINT,
     TE_DIV2,
     TE_TEST, TE_DELETE, TE_OK, TE_CANCEL,
     TE_NOBJS
@@ -301,10 +301,9 @@ static int validate_drive(const Drive *d, const DriveConfig *cfg, int skip_index
             sprintf(msg, "[3][Validation error|Drive %c: port must be 1-65535.][OK]", d->letter);
             return 0;
         }
-        if (!buf_nonempty(d->mount_path)) {
-            sprintf(msg, "[3][Validation error|Drive %c: mount path is empty.][OK]", d->letter);
-            return 0;
-        }
+        /* Empty mount_path is valid: it means "server root". Not
+         * normalized to "/" here -- the canonical empty-vs-"/"
+         * representation is still being settled on the firmware side. */
         break;
     case DRIVE_TYPE_SD:
         if (!buf_nonempty(d->sd_path)) {
@@ -320,59 +319,326 @@ static int validate_drive(const Drive *d, const DriveConfig *cfg, int skip_index
 }
 
 /* ================================================================== */
-/* Firmware probe (Fase AC-1/AC-2, reused as-is). GET_CONFIG_INFO/      */
-/* GET_SERVER(0) probe the firmware's currently active server -- this  */
-/* phase has no way to point it at the fields being edited, so the     */
-/* result text says so explicitly (this is not a connection test of    */
-/* the server being edited).                                           */
+/* Firmware probe (Fase AC-4, protocol v2). Protocol v2 has no "active   */
+/* server" concept -- it shows the GET_CONFIG_INFO summary, then the    */
+/* record at a fixed representative slot 0 (the UI does not yet track a */
+/* per-drive firmware slot index for an in-progress edit). Explicitly   */
+/* not a network connection test of the drive being edited.             */
 /* ================================================================== */
 static void dialog_probe_firmware(void)
 {
     SideTnfsConfigInfo config_info;
-    SideTnfsServerInfo server_info;
-    char msg[220];
+    SideTnfsDriveInfo drive_info;
+    char msg[200];
 
     if (sidetnfs_probe_get_config_info(&config_info) != SIDETNFS_PROBE_OK) {
         form_alert(1, "[3][SideTNFS firmware|not responding (timeout).][OK]");
         return;
     }
-    if (config_info.protocol_version != 1) {
-        sprintf(msg, "[3][Unexpected protocol version|Got %lu, expected 1.][OK]",
+    if (config_info.status != SIDETNFS_STATUS_OK) {
+        sprintf(msg, "[3][SideTNFS firmware|Unexpected status %lu.][OK]", config_info.status);
+        form_alert(1, msg);
+        return;
+    }
+    if (config_info.protocol_version != 2) {
+        sprintf(msg, "[3][Unexpected protocol version|Got %lu, expected 2.][OK]",
                 config_info.protocol_version);
         form_alert(1, msg);
         return;
     }
-    if (config_info.server_count == 0) {
-        form_alert(1, "[3][SideTNFS firmware|No servers configured.][OK]");
+
+    sprintf(msg, "[1][Firmware configuration|Config drive: %c:|Drives stored: %lu][OK]",
+            (char)config_info.config_drive_letter, config_info.drive_count);
+    form_alert(1, msg);
+
+    if (sidetnfs_probe_get_drive(0, &drive_info) != SIDETNFS_PROBE_OK) {
+        form_alert(1, "[3][SideTNFS drive|GET_DRIVE(0) timed out.][OK]");
         return;
     }
 
-    if (sidetnfs_probe_get_server(0, &server_info) != SIDETNFS_PROBE_OK) {
-        form_alert(1, "[3][SideTNFS server|GET_SERVER timed out.][OK]");
-        return;
-    }
-
-    switch (server_info.status) {
-    case SIDETNFS_SERVER_STATUS_OK:
-        sprintf(msg, "[1][Firmware active server (not these fields)|%s|%s:%lu|%s / %s][OK]",
-                server_info.nickname,
-                server_info.host, server_info.port,
-                server_info.transport == 0 ? "UDP" : "TCP",
-                server_info.mount_path);
+    switch (drive_info.status) {
+    case SIDETNFS_STATUS_OK:
+        if (drive_info.type == SIDETNFS_DRIVE_TYPE_TNFS) {
+            sprintf(msg, "[1][Slot 0 (not a network test)|%c: %s|%s:%lu|%s / %s][OK]",
+                    (char)drive_info.letter, drive_info.nickname,
+                    drive_info.host, drive_info.port,
+                    drive_info.transport == SIDETNFS_TRANSPORT_UDP ? "UDP" : "TCP",
+                    drive_info.mount_path);
+        } else if (drive_info.type == SIDETNFS_DRIVE_TYPE_SD) {
+            sprintf(msg, "[1][Slot 0 (not a network test)|%c: %s|SD|%s][OK]",
+                    (char)drive_info.letter, drive_info.nickname, drive_info.sd_path);
+        } else {
+            sprintf(msg, "[3][Slot 0|Unknown drive type %lu.][OK]", drive_info.type);
+        }
         form_alert(1, msg);
         break;
-    case SIDETNFS_SERVER_STATUS_INVALID_INDEX:
-        form_alert(1, "[3][SideTNFS server|Invalid server index.][OK]");
-        break;
-    case SIDETNFS_SERVER_STATUS_EMPTY_SLOT:
-        form_alert(1, "[3][SideTNFS server|Server slot 0 is empty.][OK]");
+    case SIDETNFS_STATUS_EMPTY_SLOT:
+        form_alert(1, "[1][Slot 0|Firmware slot 0 is empty.][OK]");
         break;
     default:
-        sprintf(msg, "[3][SideTNFS server|Unexpected status %lu.][OK]",
-                server_info.status);
+        sprintf(msg, "[3][SideTNFS drive|Unexpected status %lu.][OK]", drive_info.status);
         form_alert(1, msg);
         break;
     }
+}
+
+/* ================================================================== */
+/* Wire <-> UI drive translation (Fase AC-4)                            */
+/* Explicit field-by-field translation, per the task's instruction to   */
+/* never memcpy() between the wire struct and the UI struct (their      */
+/* padding/alignment/field order are not proven identical, even though  */
+/* several string lengths happen to match numerically today).           */
+/* ================================================================== */
+
+/* Caller must have already validated w->type is SD or TNFS -- an
+ * unrecognized type is a load-time error, not something to silently
+ * default to TNFS here. */
+static void wire_to_ui_drive(const SideTnfsDriveInfo *w, Drive *d)
+{
+    memset(d, 0, sizeof(*d));
+    d->used   = (int)w->used;
+    d->letter = (char)w->letter;
+
+    if (w->type == SIDETNFS_DRIVE_TYPE_TNFS) {
+        d->type      = DRIVE_TYPE_TNFS;
+        d->transport = (w->transport == SIDETNFS_TRANSPORT_TCP) ? DRIVE_TRANSPORT_TCP : DRIVE_TRANSPORT_UDP;
+        d->port      = (int)w->port;
+        strncpy(d->host, w->host, DRIVE_HOST_LEN - 1);
+        d->host[DRIVE_HOST_LEN - 1] = '\0';
+        strncpy(d->mount_path, w->mount_path, DRIVE_MOUNT_LEN - 1);
+        d->mount_path[DRIVE_MOUNT_LEN - 1] = '\0';
+    } else if (w->type == SIDETNFS_DRIVE_TYPE_SD) {
+        d->type = DRIVE_TYPE_SD;
+        strncpy(d->sd_path, w->sd_path, DRIVE_SDPATH_LEN - 1);
+        d->sd_path[DRIVE_SDPATH_LEN - 1] = '\0';
+    }
+
+    strncpy(d->nickname, w->nickname, DRIVE_NICK_LEN - 1);
+    d->nickname[DRIVE_NICK_LEN - 1] = '\0';
+}
+
+static void ui_to_wire_drive(const Drive *d, SideTnfsDriveInfo *w)
+{
+    memset(w, 0, sizeof(*w));
+    w->used   = (unsigned long)(d->used ? 1 : 0);
+    w->letter = (unsigned long)(unsigned char)d->letter;
+    w->type   = (d->type == DRIVE_TYPE_SD)   ? SIDETNFS_DRIVE_TYPE_SD
+              : (d->type == DRIVE_TYPE_TNFS) ? SIDETNFS_DRIVE_TYPE_TNFS
+                                              : SIDETNFS_DRIVE_TYPE_NONE;
+    w->transport = (d->transport == DRIVE_TRANSPORT_TCP) ? SIDETNFS_TRANSPORT_TCP : SIDETNFS_TRANSPORT_UDP;
+    w->port      = (unsigned long)d->port;
+
+    strncpy(w->nickname, d->nickname, SIDETNFS_NICKNAME_LEN - 1);
+    if (d->type == DRIVE_TYPE_TNFS) {
+        strncpy(w->host, d->host, SIDETNFS_HOST_LEN - 1);
+        strncpy(w->mount_path, d->mount_path, SIDETNFS_MOUNTPATH_LEN - 1);
+    } else if (d->type == DRIVE_TYPE_SD) {
+        strncpy(w->sd_path, d->sd_path, SIDETNFS_SDPATH_LEN - 1);
+    }
+    /* NUL-termination of every field is already guaranteed by the
+     * memset(w,0,...) above -- strncpy here never reaches the last byte
+     * since the UI-side source fields are exactly one byte shorter. */
+}
+
+/* ================================================================== */
+/* Firmware load / readback (Fase AC-4)                                 */
+/* ================================================================== */
+
+/* Builds *out entirely from firmware: GET_CONFIG_INFO, then GET_DRIVE
+ * for every ordinary slot. Returns 1 on a fully consistent read, 0 on
+ * any timeout, unexpected status, or unrecognized field -- *out is left
+ * untouched on failure (never partially filled). No alerts: this is the
+ * silent building block for both the startup load and the post-Save
+ * readback verification, which report failure differently. */
+static int fetch_drive_config_from_firmware(DriveConfig *out)
+{
+    SideTnfsConfigInfo config_info;
+    SideTnfsDriveInfo wire;
+    DriveConfig built;
+    int i, n;
+    char letter;
+
+    if (sidetnfs_probe_get_config_info(&config_info) != SIDETNFS_PROBE_OK)
+        return 0;
+    if (config_info.status != SIDETNFS_STATUS_OK)
+        return 0;
+    if (config_info.protocol_version != 2)
+        return 0;
+    if (config_info.max_drives != (unsigned long)MAX_ORDINARY_DRIVES)
+        return 0;
+
+    letter = (char)config_info.config_drive_letter;
+    if (letter < 'A' || letter > 'Z' || letter == 'A' || letter == 'B')
+        return 0;
+
+    memset(&built, 0, sizeof(built));
+    built.drives[0].used   = 1;
+    built.drives[0].letter = letter;
+    built.drives[0].type   = DRIVE_TYPE_CONFIG;
+    strncpy(built.drives[0].nickname, "Config disk", DRIVE_NICK_LEN - 1);
+    n = 1;
+
+    for (i = 0; i < MAX_ORDINARY_DRIVES; i++) {
+        if (sidetnfs_probe_get_drive((unsigned long)i, &wire) != SIDETNFS_PROBE_OK)
+            return 0;
+        if (wire.status == SIDETNFS_STATUS_EMPTY_SLOT)
+            continue; /* no UI row for this slot */
+        if (wire.status != SIDETNFS_STATUS_OK)
+            return 0;
+        if (wire.type != SIDETNFS_DRIVE_TYPE_SD && wire.type != SIDETNFS_DRIVE_TYPE_TNFS)
+            return 0; /* unknown/corrupt type -- never silently treated as TNFS */
+        if (n >= MAX_DRIVES)
+            return 0;
+
+        wire_to_ui_drive(&wire, &built.drives[n]);
+        n++;
+    }
+
+    built.drive_count = n;
+    drive_config_sort_by_letter(&built);
+    *out = built;
+    return 1;
+}
+
+/* Startup wrapper: distinguishes "no firmware at all" (silent, expected
+ * offline case -- a plain GET_CONFIG_INFO timeout) from "firmware
+ * present but its configuration is unusable" (visible alert, since that
+ * is not the normal offline case). On success, *cfg is entirely
+ * firmware-driven; on failure *cfg keeps whatever main.c initialized it
+ * to (built-in defaults, no file involved either way). */
+static int dialog_startup_load(DriveConfig *cfg)
+{
+    SideTnfsConfigInfo probe;
+    DriveConfig fw_cfg;
+
+    if (sidetnfs_probe_get_config_info(&probe) != SIDETNFS_PROBE_OK)
+        return 0; /* no firmware detected -- expected offline case, no alert */
+
+    if (fetch_drive_config_from_firmware(&fw_cfg)) {
+        *cfg = fw_cfg;
+        return 1;
+    }
+
+    form_alert(1, "[3][SideTNFS firmware|Unexpected configuration.|Using local file instead.][OK]");
+    return 0;
+}
+
+static int drives_match(const Drive *a, const Drive *b)
+{
+    if (a->used != b->used) return 0;
+    if (a->letter != b->letter) return 0;
+    if (a->type != b->type) return 0;
+    if (strcmp(a->nickname, b->nickname) != 0) return 0;
+
+    switch (a->type) {
+    case DRIVE_TYPE_TNFS:
+        if (a->transport != b->transport) return 0;
+        if (a->port != b->port) return 0;
+        if (strcmp(a->host, b->host) != 0) return 0;
+        if (strcmp(a->mount_path, b->mount_path) != 0) return 0;
+        break;
+    case DRIVE_TYPE_SD:
+        if (strcmp(a->sd_path, b->sd_path) != 0) return 0;
+        break;
+    case DRIVE_TYPE_CONFIG:
+    default:
+        break;
+    }
+    return 1;
+}
+
+/* Both configs must already be sorted by letter (drive_config_sort_by_letter
+ * guarantees this for both the live UI list and fetch_drive_config_from_firmware's
+ * output), so an index-by-index comparison after equal drive_count is valid. */
+static int drive_config_matches(const DriveConfig *a, const DriveConfig *b)
+{
+    int i;
+    if (a->drive_count != b->drive_count) return 0;
+    for (i = 0; i < a->drive_count; i++)
+        if (!drives_match(&a->drives[i], &b->drives[i]))
+            return 0;
+    return 1;
+}
+
+/* Fase AC-4: full firmware-backed Save. DELETE_DRIVE for all 8 ordinary
+ * slots first (so letter swaps never hit a temporary duplicate), then
+ * SET_CONFIG_DRIVE, one SET_DRIVE per used ordinary UI drive, then
+ * exactly one SAVE_CONFIG, then a full readback + compare. Returns 1
+ * only after the readback matches exactly; msg is always filled in on
+ * failure. Never calls SAVE_CONFIG if an earlier step failed -- flash is
+ * only ever touched by that one call. */
+static int save_to_firmware(const DriveConfig *cfg, char *msg)
+{
+    unsigned long status;
+    int i, slot, config_idx;
+    unsigned long config_letter;
+    DriveConfig readback;
+
+    for (i = 0; i < MAX_ORDINARY_DRIVES; i++) {
+        if (sidetnfs_probe_delete_drive((unsigned long)i, &status) != SIDETNFS_PROBE_OK) {
+            sprintf(msg, "[3][Save to firmware failed|DELETE_DRIVE(%d) timed out.|Nothing was saved.][OK]", i);
+            return 0;
+        }
+        if (status != SIDETNFS_STATUS_OK && status != SIDETNFS_STATUS_EMPTY_SLOT) {
+            sprintf(msg, "[3][Save to firmware failed|DELETE_DRIVE(%d): status %lu.|Nothing was saved.][OK]", i, status);
+            return 0;
+        }
+    }
+
+    config_idx = drive_config_config_index(cfg);
+    config_letter = (config_idx >= 0) ? (unsigned long)(unsigned char)cfg->drives[config_idx].letter : 0UL;
+    if (sidetnfs_probe_set_config_drive(config_letter, &status) != SIDETNFS_PROBE_OK) {
+        sprintf(msg, "[3][Save to firmware failed|SET_CONFIG_DRIVE timed out.|Nothing was saved.][OK]");
+        return 0;
+    }
+    if (status != SIDETNFS_STATUS_OK) {
+        sprintf(msg, "[3][Save to firmware failed|SET_CONFIG_DRIVE: status %lu.|Nothing was saved.][OK]", status);
+        return 0;
+    }
+
+    slot = 0;
+    for (i = 0; i < cfg->drive_count; i++) {
+        SideTnfsDriveInfo wire;
+        const Drive *d = &cfg->drives[i];
+
+        if (d->type == DRIVE_TYPE_CONFIG)
+            continue;
+        if (slot >= MAX_ORDINARY_DRIVES) {
+            sprintf(msg, "[3][Save to firmware failed|Too many drives.|Nothing was saved.][OK]");
+            return 0;
+        }
+
+        ui_to_wire_drive(d, &wire);
+        if (sidetnfs_probe_set_drive((unsigned long)slot, &wire, &status) != SIDETNFS_PROBE_OK) {
+            sprintf(msg, "[3][Save to firmware failed|SET_DRIVE(%d) timed out.|Nothing was saved.][OK]", slot);
+            return 0;
+        }
+        if (status != SIDETNFS_STATUS_OK) {
+            sprintf(msg, "[3][Save to firmware failed|Drive %c: status %lu.|Nothing was saved.][OK]", d->letter, status);
+            return 0;
+        }
+        slot++;
+    }
+
+    if (sidetnfs_probe_save_config(&status) != SIDETNFS_PROBE_OK) {
+        sprintf(msg, "[3][Save to firmware failed|SAVE_CONFIG timed out.|Nothing was saved.][OK]");
+        return 0;
+    }
+    if (status != SIDETNFS_STATUS_OK) {
+        sprintf(msg, "[3][Save to firmware failed|SAVE_CONFIG: status %lu.][OK]", status);
+        return 0;
+    }
+
+    if (!fetch_drive_config_from_firmware(&readback)) {
+        sprintf(msg, "[3][Save verification failed|Could not read back|the saved configuration.][OK]");
+        return 0;
+    }
+    if (!drive_config_matches(cfg, &readback)) {
+        sprintf(msg, "[3][Save verification failed|Flash contents do not match|the edited list.][OK]");
+        return 0;
+    }
+
+    return 1;
 }
 
 /* ================================================================== */
@@ -666,7 +932,7 @@ static void te_dialog_init(int show_delete)
     short sx, sy, sw, sh;
     int rh, tm, pitch;
     int DW, DH, xl, xf;
-    int yt, ydiv1, ydrv, ynick, yhost, yport, ytrans, ymount, ydiv2, ybtn;
+    int yt, ydiv1, ydrv, ynick, yhost, yport, ytrans, ymount, ymounthint, ydiv2, ybtn;
 
     graf_handle(&cw, &ch, &bw, &bh);
     wind_get(0, WF_WORKXYWH, &sx, &sy, &sw, &sh);
@@ -680,17 +946,18 @@ static void te_dialog_init(int show_delete)
     xl = 2 * cw;
     xf = 13 * cw;
 
-    yt     = tm;
-    ydiv1  = yt + rh + 1;
-    ydrv   = ydiv1 + 2;
-    ynick  = ydrv + pitch;
-    yhost  = ynick + pitch;
-    yport  = yhost + pitch;
-    ytrans = yport + pitch;
-    ymount = ytrans + pitch;
-    ydiv2  = ymount + rh + 2;
-    ybtn   = ydiv2 + 4;
-    DH     = ybtn + rh + tm;
+    yt         = tm;
+    ydiv1      = yt + rh + 1;
+    ydrv       = ydiv1 + 2;
+    ynick      = ydrv + pitch;
+    yhost      = ynick + pitch;
+    yport      = yhost + pitch;
+    ytrans     = yport + pitch;
+    ymount     = ytrans + pitch;
+    ymounthint = ymount + pitch;
+    ydiv2      = ymounthint + rh + 2;
+    ybtn       = ydiv2 + 4;
+    DH         = ybtn + rh + tm;
 
     set_obj(te_dlg, TE_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
     te_dlg[TE_ROOT].ob_spec.index = 0x00031070L;
@@ -735,6 +1002,11 @@ static void te_dialog_init(int show_delete)
     te_dlg[TE_LBL_MOUNT].ob_spec.free_string = "Mount dir:";
     set_obj(te_dlg, TE_MOUNT_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, ymount, 23*cw, rh);
     te_dlg[TE_MOUNT_EDIT].ob_spec.tedinfo = &ti_te_mount;
+
+    /* Empty mount_path is valid ("server root") -- not auto-normalized
+     * to "/" yet, see validate_drive(). */
+    set_obj(te_dlg, TE_MOUNT_HINT, G_STRING, NONE, NORMAL, xf, ymounthint, 30*cw, rh);
+    te_dlg[TE_MOUNT_HINT].ob_spec.free_string = "empty = server root";
 
     set_obj(te_dlg, TE_DIV2, G_BOX, NONE, NORMAL, cw, ydiv2, DW - 2*cw, 2);
     te_dlg[TE_DIV2].ob_spec.index = 0x00001171L;
@@ -783,6 +1055,13 @@ static void te_save_to_drive(Drive *d)
     buf_copy(buf_te_host,  d->host,       DRIVE_HOST_LEN);
     buf_copy(buf_te_mount, d->mount_path, DRIVE_MOUNT_LEN);
 
+    /* A field left empty by the user means "server root": silently
+     * normalized to "/" here rather than sent to the firmware as "". */
+    if (d->mount_path[0] == '\0') {
+        d->mount_path[0] = '/';
+        d->mount_path[1] = '\0';
+    }
+
     d->port = atoi(buf_te_port); /* range-checked by validate_drive() */
     d->transport = DRIVE_TRANSPORT_UDP; /* TCP button is DISABLED: never settable this phase */
     d->type = DRIVE_TYPE_TNFS;
@@ -807,6 +1086,8 @@ static int tnfs_editor_run(DriveConfig *cfg, int index)
         working.letter    = drive_config_suggest_letter(cfg);
         working.transport = DRIVE_TRANSPORT_UDP;
         working.port      = 16384;
+        working.mount_path[0] = '/';
+        working.mount_path[1] = '\0';
     } else {
         working = cfg->drives[index];
     }
@@ -1014,6 +1295,24 @@ static void ov_refresh_rows(const DriveConfig *cfg)
     }
 }
 
+/* Software cold-reset of the Atari itself (not the Pico). Clears the
+ * three "memory valid" checksum longs at $420/$43A/$51A so TOS treats
+ * RAM as invalid and performs a full reinit, then jumps through the
+ * reset vector at $4 -- same effect as the proven inline-asm sequence
+ * in sidecart-configurator-atari's main.c, expressed in plain C instead
+ * of assembly. All of $420/$43A/$51A/$4 are below the low-memory
+ * boundary TOS protects from user-mode access, so this must run in
+ * supervisor mode via Supexec() -- never called directly. Never
+ * returns. */
+static long atari_do_reset(void)
+{
+    *(volatile long *)0x420L = 0;
+    *(volatile long *)0x43AL = 0;
+    *(volatile long *)0x51AL = 0;
+    ((void (*)(void))(*(volatile long *)0x4L))();
+    return 0; /* unreached */
+}
+
 /* ================================================================== */
 /* Main entry point                                                    */
 /* ================================================================== */
@@ -1024,8 +1323,16 @@ void dialog_run(DriveConfig *cfg)
     short which;
     int done;
     int i;
+    int firmware_backed;
 
     shared_fields_init();
+
+    /* No local file storage: *cfg starts out as the built-in defaults
+     * (drive_config_init_defaults(), set by main.c) and is fully
+     * replaced by the firmware's own drive list when one is found. See
+     * dialog_startup_load(). Without firmware, Save has nothing to
+     * write to and says so. */
+    firmware_backed = dialog_startup_load(cfg);
 
     ov_dialog_init();
     ov_refresh_rows(cfg);
@@ -1073,7 +1380,7 @@ void dialog_run(DriveConfig *cfg)
             }
 
         } else if (which == OV_ADD) {
-            if (cfg->drive_count >= MAX_DRIVES) {
+            if (drive_config_ordinary_count(cfg) >= MAX_ORDINARY_DRIVES) {
                 form_alert(1, "[3][Add disk|Maximum of 8 drives reached.][OK]");
             } else {
                 int type = add_disk_type_run();
@@ -1090,19 +1397,40 @@ void dialog_run(DriveConfig *cfg)
             int all_valid = 1;
             char msg[220];
 
-            for (i = 0; i < cfg->drive_count; i++) {
-                if (!validate_drive(&cfg->drives[i], cfg, i, msg)) {
-                    form_alert(1, msg);
-                    all_valid = 0;
-                    break;
-                }
+            if (drive_config_ordinary_count(cfg) > MAX_ORDINARY_DRIVES) {
+                sprintf(msg, "[3][Validation error|Too many drives (max %d).][OK]", MAX_ORDINARY_DRIVES);
+                form_alert(1, msg);
+                all_valid = 0;
             }
             if (all_valid) {
-                if (config_save(cfg, CFG_FILENAME))
-                    form_alert(1, "[1][Configuration saved locally.|Firmware update not yet applied.][OK]");
-                else
-                    form_alert(1, "[3][Save error|Could not write|SIDETNFS.CFG][OK]");
-                done = 1;
+                for (i = 0; i < cfg->drive_count; i++) {
+                    if (!validate_drive(&cfg->drives[i], cfg, i, msg)) {
+                        form_alert(1, msg);
+                        all_valid = 0;
+                        break;
+                    }
+                }
+            }
+
+            if (all_valid && firmware_backed) {
+                /* The full write sequence + readback verification lives
+                 * in save_to_firmware(); this is now the only place
+                 * config is ever persisted -- no local file involved. */
+                if (save_to_firmware(cfg, msg)) {
+                    /* Cancel is the default (button 1): a full-machine
+                     * reset is easy to trigger by accident otherwise. */
+                    if (form_alert(1, "[1][Configuration saved to SideTNFS.|Reboot required.|"
+                                      "Multi-drive mounting is not active yet.][Cancel|Reset Now]") == 2) {
+                        Supexec(atari_do_reset);
+                    }
+                    done = 1;
+                } else {
+                    form_alert(1, msg);
+                }
+            } else if (all_valid) {
+                /* No firmware detected -- there is nowhere left to save
+                 * to (no local file fallback anymore). */
+                form_alert(1, "[3][Save failed|No SideTNFS firmware detected.|Nothing was saved.][OK]");
             }
 
         } else if (which == OV_CANCEL) {
