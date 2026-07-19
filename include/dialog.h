@@ -1,8 +1,8 @@
 #ifndef DIALOG_H
 #define DIALOG_H
 
-#include "profile.h"
+#include "drive.h"
 
-void dialog_run(AppConfig *cfg);
+void dialog_run(DriveConfig *cfg);
 
 #endif

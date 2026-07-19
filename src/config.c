@@ -5,8 +5,6 @@
 
 #define CFG_LINE_LEN 160
 
-typedef enum { SEC_NONE, SEC_GLOBAL, SEC_PROFILE } cfg_section_t;
-
 static void cfg_trim(char *s)
 {
     int n = (int)strlen(s);
@@ -46,46 +44,62 @@ static int cfg_starts_with_ci(const char *s, const char *prefix)
     return 1;
 }
 
-static char cfg_norm_drive(const char *value, char fallback)
+static char cfg_upper1(const char *value)
 {
     char c = value[0];
     if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-    if (c >= 'A' && c <= 'Z') return c;
-    return fallback;
+    return c;
 }
 
-static int cfg_parse_bool(const char *value, int fallback)
+/* Whole-parsed-file validation: mirrors the firmware's own "any invalid
+ * step rejects the entire block" philosophy (see
+ * sidetnfs-config-protocol.md, Fase 9B2 loading order) -- never use a
+ * half-valid drive list. */
+static int cfg_validate(const DriveConfig *cfg)
 {
-    if (cfg_streq_ci(value, "1") || cfg_streq_ci(value, "yes")) return 1;
-    if (cfg_streq_ci(value, "0") || cfg_streq_ci(value, "no"))  return 0;
-    return fallback;
+    int i, j;
+    int config_count = 0;
+
+    if (cfg->drive_count <= 0 || cfg->drive_count > MAX_DRIVES)
+        return 0;
+
+    for (i = 0; i < cfg->drive_count; i++) {
+        const Drive *d = &cfg->drives[i];
+        if (!d->used)
+            return 0;
+        if (d->letter < 'A' || d->letter > 'Z')
+            return 0;
+        if (d->letter == 'A' || d->letter == 'B')
+            return 0;
+        if (d->type == DRIVE_TYPE_CONFIG)
+            config_count++; /* exactly one CONFIG drive, position not fixed */
+        for (j = 0; j < i; j++)
+            if (cfg->drives[j].letter == d->letter)
+                return 0;
+    }
+    return config_count == 1;
 }
 
-void config_set_defaults(AppConfig *cfg)
+void config_set_defaults(DriveConfig *cfg)
 {
-    profiles_init_defaults(cfg);
+    drive_config_init_defaults(cfg);
 }
 
-int config_load(AppConfig *cfg, const char *filename)
+int config_load(DriveConfig *cfg, const char *filename)
 {
     FILE *fp;
     char line[CFG_LINE_LEN];
-    cfg_section_t section;
-    Profile *cur;
-    char active_name[PROFILE_NAME_LEN];
-    int have_active;
-
-    profiles_init_defaults(cfg);
+    DriveConfig tmp;
+    Drive *cur;
 
     fp = fopen(filename, "r");
-    if (!fp)
+    if (!fp) {
+        drive_config_init_defaults(cfg);
         return 0;
+    }
 
-    cfg->profile_count = 0;
-    section = SEC_NONE;
-    cur = (Profile *)0;
-    active_name[0] = '\0';
-    have_active = 0;
+    memset(&tmp, 0, sizeof(tmp));
+    cur = (Drive *)0;
 
     while (fgets(line, CFG_LINE_LEN, fp)) {
         char *eq;
@@ -104,34 +118,27 @@ int config_load(AppConfig *cfg, const char *filename)
                 *end = '\0';
                 cfg_trim(name);
 
-                if (cfg_streq_ci(name, "global")) {
-                    section = SEC_GLOBAL;
-                    cur = (Profile *)0;
-                } else if (cfg_starts_with_ci(name, "profile:")) {
-                    section = SEC_PROFILE;
-                    if (cfg->profile_count < MAX_PROFILES) {
-                        char *pname = name + 8;
-                        cfg_trim(pname);
-                        cur = &cfg->profiles[cfg->profile_count++];
-                        memset(cur, 0, sizeof(*cur));
-                        strncpy(cur->name, pname, PROFILE_NAME_LEN - 1);
-                        cur->port = 16384;
-                        strncpy(cur->protocol, "TNFS", PROTOCOL_LEN - 1);
-                        strncpy(cur->mount, "/", MOUNT_LEN - 1);
-                        cur->readonly = 0;
-                    } else {
-                        cur = (Profile *)0;
-                    }
+                if (cfg_starts_with_ci(name, "drive:") && tmp.drive_count < MAX_DRIVES) {
+                    char *letter = name + 6;
+                    cfg_trim(letter);
+                    cur = &tmp.drives[tmp.drive_count++];
+                    memset(cur, 0, sizeof(*cur));
+                    cur->used   = 1;
+                    cur->letter = cfg_upper1(letter);
+                    cur->transport = DRIVE_TRANSPORT_UDP;
+                    cur->port      = 16384;
                 } else {
-                    section = SEC_NONE;
-                    cur = (Profile *)0;
+                    /* Unrecognized section (old [global]/[profile:...],
+                     * or a drive: section past MAX_DRIVES) -- ignore its
+                     * keys rather than misinterpreting them. */
+                    cur = (Drive *)0;
                 }
             }
             continue;
         }
 
         eq = strchr(line, '=');
-        if (!eq)
+        if (!eq || !cur)
             continue;
         *eq = '\0';
         key = line;
@@ -141,106 +148,91 @@ int config_load(AppConfig *cfg, const char *filename)
         if (key[0] == '\0')
             continue;
 
-        if (section == SEC_GLOBAL) {
-            if (cfg_streq_ci(key, "active")) {
-                strncpy(active_name, val, PROFILE_NAME_LEN - 1);
-                active_name[PROFILE_NAME_LEN - 1] = '\0';
-                have_active = 1;
-            } else if (cfg_streq_ci(key, "tnfs_drive")) {
-                cfg->tnfs_drive = cfg_norm_drive(val, cfg->tnfs_drive);
-            } else if (cfg_streq_ci(key, "config_drive")) {
-                cfg->config_drive = cfg_norm_drive(val, cfg->config_drive);
-            }
-
-        } else if (section == SEC_PROFILE && cur) {
-            if (cfg_streq_ci(key, "server")) {
-                strncpy(cur->server, val, SERVER_LEN - 1);
-                cur->server[SERVER_LEN - 1] = '\0';
-            } else if (cfg_streq_ci(key, "port")) {
-                int port = atoi(val);
-                if (port >= 1 && port <= 65535)
-                    cur->port = port;
-            } else if (cfg_streq_ci(key, "protocol")) {
-                strncpy(cur->protocol, val, PROTOCOL_LEN - 1);
-                cur->protocol[PROTOCOL_LEN - 1] = '\0';
-            } else if (cfg_streq_ci(key, "mount")) {
-                strncpy(cur->mount, val, MOUNT_LEN - 1);
-                cur->mount[MOUNT_LEN - 1] = '\0';
-            } else if (cfg_streq_ci(key, "readonly")) {
-                cur->readonly = cfg_parse_bool(val, cur->readonly);
-            }
+        if (cfg_streq_ci(key, "type")) {
+            if (cfg_streq_ci(val, "CONFIG"))     cur->type = DRIVE_TYPE_CONFIG;
+            else if (cfg_streq_ci(val, "SD"))    cur->type = DRIVE_TYPE_SD;
+            else if (cfg_streq_ci(val, "TNFS"))  cur->type = DRIVE_TYPE_TNFS;
+        } else if (cfg_streq_ci(key, "nickname")) {
+            strncpy(cur->nickname, val, DRIVE_NICK_LEN - 1);
+            cur->nickname[DRIVE_NICK_LEN - 1] = '\0';
+        } else if (cfg_streq_ci(key, "transport")) {
+            cur->transport = cfg_streq_ci(val, "TCP") ? DRIVE_TRANSPORT_TCP : DRIVE_TRANSPORT_UDP;
+        } else if (cfg_streq_ci(key, "host")) {
+            strncpy(cur->host, val, DRIVE_HOST_LEN - 1);
+            cur->host[DRIVE_HOST_LEN - 1] = '\0';
+        } else if (cfg_streq_ci(key, "port")) {
+            int port = atoi(val);
+            if (port >= 1 && port <= 65535)
+                cur->port = port;
+        } else if (cfg_streq_ci(key, "mount_path")) {
+            strncpy(cur->mount_path, val, DRIVE_MOUNT_LEN - 1);
+            cur->mount_path[DRIVE_MOUNT_LEN - 1] = '\0';
+        } else if (cfg_streq_ci(key, "sd_path")) {
+            strncpy(cur->sd_path, val, DRIVE_SDPATH_LEN - 1);
+            cur->sd_path[DRIVE_SDPATH_LEN - 1] = '\0';
         }
     }
 
     fclose(fp);
 
-    if (cfg->profile_count == 0) {
-        profiles_init_defaults(cfg);
+    if (tmp.drive_count == 0) {
+        drive_config_init_defaults(cfg);
         return 0;
     }
 
-    cfg->active_index = 0;
-    if (have_active) {
-        int i;
-        for (i = 0; i < cfg->profile_count; i++) {
-            if (strcmp(cfg->profiles[i].name, active_name) == 0) {
-                cfg->active_index = i;
-                break;
-            }
-        }
+    /* Always list drives in driveletter order, regardless of on-disk
+     * order -- the config drive's position is no longer fixed. */
+    drive_config_sort_by_letter(&tmp);
+
+    if (!cfg_validate(&tmp)) {
+        drive_config_init_defaults(cfg);
+        return 0;
     }
 
+    *cfg = tmp;
     return 1;
 }
 
-int config_save(const AppConfig *cfg, const char *filename)
+int config_save(const DriveConfig *cfg, const char *filename)
 {
     FILE *fp;
     int i;
-    const Profile *active;
 
     fp = fopen(filename, "w");
     if (!fp)
         return 0;
 
     fprintf(fp, "; SideTNFS configuration file\n");
-    fprintf(fp, "; Version 1\n\n");
+    fprintf(fp, "; Version %d\n\n", CFG_FORMAT_VERSION);
 
-    active = (cfg->active_index >= 0 && cfg->active_index < cfg->profile_count)
-                 ? &cfg->profiles[cfg->active_index] : (const Profile *)0;
+    for (i = 0; i < cfg->drive_count; i++) {
+        const Drive *d = &cfg->drives[i];
+        if (!d->used)
+            continue;
 
-    fprintf(fp, "[global]\n");
-    fprintf(fp, "active=%s\n", active ? active->name : "");
-    fprintf(fp, "tnfs_drive=%c\n", cfg->tnfs_drive);
-    fprintf(fp, "config_drive=%c\n", cfg->config_drive);
-    fprintf(fp, "\n");
-
-    for (i = 0; i < cfg->profile_count; i++) {
-        const Profile *p = &cfg->profiles[i];
-        fprintf(fp, "[profile:%s]\n", p->name);
-        fprintf(fp, "server=%s\n",   p->server);
-        fprintf(fp, "port=%d\n",     p->port);
-        fprintf(fp, "protocol=%s\n", p->protocol);
-        fprintf(fp, "mount=%s\n",    p->mount);
-        fprintf(fp, "readonly=%d\n", p->readonly ? 1 : 0);
+        fprintf(fp, "[drive:%c]\n", d->letter);
+        switch (d->type) {
+        case DRIVE_TYPE_CONFIG:
+            fprintf(fp, "type=CONFIG\n");
+            fprintf(fp, "nickname=%s\n", d->nickname);
+            break;
+        case DRIVE_TYPE_TNFS:
+            fprintf(fp, "type=TNFS\n");
+            fprintf(fp, "nickname=%s\n", d->nickname);
+            fprintf(fp, "transport=%s\n", d->transport == DRIVE_TRANSPORT_TCP ? "TCP" : "UDP");
+            fprintf(fp, "host=%s\n", d->host);
+            fprintf(fp, "port=%d\n", d->port);
+            fprintf(fp, "mount_path=%s\n", d->mount_path);
+            break;
+        case DRIVE_TYPE_SD:
+            fprintf(fp, "type=SD\n");
+            fprintf(fp, "nickname=%s\n", d->nickname);
+            fprintf(fp, "sd_path=%s\n", d->sd_path);
+            break;
+        }
         fprintf(fp, "\n");
     }
 
     fclose(fp);
     return 1;
-}
-
-Profile *config_get_active_profile(AppConfig *cfg)
-{
-    return profiles_get_active(cfg);
-}
-
-Profile *config_find_profile(AppConfig *cfg, const char *name)
-{
-    int i;
-    for (i = 0; i < cfg->profile_count; i++) {
-        if (strcmp(cfg->profiles[i].name, name) == 0)
-            return &cfg->profiles[i];
-    }
-    return (Profile *)0;
 }

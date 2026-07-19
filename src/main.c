@@ -2,7 +2,7 @@
 #include "dialog.h"
 #include "config.h"
 
-static AppConfig cfg;
+static DriveConfig cfg;
 
 int main(void)
 {

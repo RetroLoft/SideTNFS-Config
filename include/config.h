@@ -1,19 +1,21 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-#include "profile.h"
+#include "drive.h"
 
-/* Reuses the AppConfig/Profile structures from profile.h instead of a
- * separate Config type: they hold exactly the same data, just keyed by
- * active_index rather than an active-profile name string. config_load()
- * resolves the file's "active=Name" key to an index after parsing. */
+/* Fase AC-3: versioned drive-list format, replacing the Fase AC-0
+ * profile-based SIDETNFS.CFG. config_load() never crashes on an old or
+ * corrupt file: any old `[profile:...]`/`[global]` file, or a `[drive:*]`
+ * file that fails validation (missing/duplicate CONFIG drive, duplicate
+ * or A/B letters), is safely ignored with a fallback to
+ * drive_config_init_defaults(). No partial/half-valid state is ever used,
+ * mirroring the firmware's own whole-block validation. */
 
-#define CFG_FILENAME "SIDETNFS.CFG"
+#define CFG_FILENAME       "SIDETNFS.CFG"
+#define CFG_FORMAT_VERSION 2
 
-void     config_set_defaults      (AppConfig *cfg);
-int      config_load              (AppConfig *cfg, const char *filename);
-int      config_save              (const AppConfig *cfg, const char *filename);
-Profile *config_get_active_profile(AppConfig *cfg);
-Profile *config_find_profile      (AppConfig *cfg, const char *name);
+void config_set_defaults(DriveConfig *cfg);
+int  config_load(DriveConfig *cfg, const char *filename);
+int  config_save(const DriveConfig *cfg, const char *filename);
 
 #endif
