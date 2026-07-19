@@ -1,0 +1,21 @@
+# Build products
+SIDETNFS.PRG
+*.PRG
+*.o
+*.map
+*.lst
+build/
+dist/
+
+# Local runtime and Atari desktop configuration
+SIDETNFS.CFG
+EMUDESK.INF
+NEWDESK.INF
+
+# Local editor and assistant state
+.vscode/
+.claude/
+
+# Temporary files
+*.bak
+*~
