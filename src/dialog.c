@@ -519,29 +519,57 @@ static int dialog_validate(void)
     return 1;
 }
 
-/* Fase AC-1: minimal GET_CONFIG_INFO probe against the SideTNFS GEMDRIVE
- * firmware, reported with a plain alert. No config fields are read or
- * used here -- this only checks that the cartridge firmware responds. */
+/* Fase AC-2: GET_CONFIG_INFO is used here only as a silent pre-check
+ * (protocol version + server_count > 0) before GET_SERVER(0). The one
+ * visible success alert is the server record below; GET_CONFIG_INFO only
+ * produces an alert when it fails. */
 static void dialog_probe_firmware(void)
 {
-    SideTnfsConfigInfo info;
-    char msg[80];
+    SideTnfsConfigInfo config_info;
+    SideTnfsServerInfo server_info;
+    char msg[220];
 
-    if (sidetnfs_probe_get_config_info(&info) != SIDETNFS_PROBE_OK) {
+    if (sidetnfs_probe_get_config_info(&config_info) != SIDETNFS_PROBE_OK) {
         form_alert(1, "[3][SideTNFS firmware|not responding (timeout).][OK]");
         return;
     }
-
-    if (info.protocol_version != 1) {
+    if (config_info.protocol_version != 1) {
         sprintf(msg, "[3][Unexpected protocol version|Got %lu, expected 1.][OK]",
-                info.protocol_version);
+                config_info.protocol_version);
         form_alert(1, msg);
         return;
     }
+    if (config_info.server_count == 0) {
+        form_alert(1, "[3][SideTNFS firmware|No servers configured.][OK]");
+        return;
+    }
 
-    sprintf(msg, "[1][SideTNFS firmware detected|Protocol: %lu|Server slots: %lu|Configured: %lu][OK]",
-            info.protocol_version, info.max_servers, info.server_count);
-    form_alert(1, msg);
+    if (sidetnfs_probe_get_server(0, &server_info) != SIDETNFS_PROBE_OK) {
+        form_alert(1, "[3][SideTNFS server|GET_SERVER timed out.][OK]");
+        return;
+    }
+
+    switch (server_info.status) {
+    case SIDETNFS_SERVER_STATUS_OK:
+        sprintf(msg, "[1][%s|%s:%lu|%s / %s][OK]",
+                server_info.nickname,
+                server_info.host, server_info.port,
+                server_info.transport == 0 ? "UDP" : "TCP",
+                server_info.mount_path);
+        form_alert(1, msg);
+        break;
+    case SIDETNFS_SERVER_STATUS_INVALID_INDEX:
+        form_alert(1, "[3][SideTNFS server|Invalid server index.][OK]");
+        break;
+    case SIDETNFS_SERVER_STATUS_EMPTY_SLOT:
+        form_alert(1, "[3][SideTNFS server|Server slot 0 is empty.][OK]");
+        break;
+    default:
+        sprintf(msg, "[3][SideTNFS server|Unexpected status %lu.][OK]",
+                server_info.status);
+        form_alert(1, msg);
+        break;
+    }
 }
 
 /* ================================================================== */
