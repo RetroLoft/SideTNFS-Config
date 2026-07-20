@@ -1,20 +1,33 @@
 /*
  * Fase AC-4: SideTNFS config-protocol version 2 -- GET_CONFIG_INFO
  * (0x040D), GET_DRIVE (0x040E), SET_DRIVE (0x040F), DELETE_DRIVE
- * (0x0410), SET_CONFIG_DRIVE (0x0411), SAVE_CONFIG (0x0412).
+ * (0x0410), SET_CONFIG_DRIVE (0x0411), SAVE_CONFIG (0x0412), plus
+ * (Fase 11A/AC-4-2) GET_NETWORK_CONFIG (0x0413), SET_NETWORK_CONFIG
+ * (0x0414), SAVE_NETWORK_CONFIG (0x0415).
  *
  * Protocol cross-checked against (read-only references, not modified):
  *   sd2tnfs/docs/sidetnfs-config-protocol.md      (contract, protocol v2)
  *   sd2tnfs/romemul/include/gemdrvemul.h          (offsets, walked from
- *     GEMDRVEMUL_SIDETNFS_CONFIG, not guessed)
- *   sd2tnfs/romemul/include/commands.h            (command codes)
- *   sd2tnfs/romemul/include/sidetnfs_config.h     (status/type/transport
- *     enum values)
+ *     GEMDRVEMUL_SIDETNFS_CONFIG, not guessed -- re-verified for the
+ *     network block: GEMDRVEMUL_SIDETNFS_NETWORK = DRIVE_SD_PATH +
+ *     SIDETNFS_SDPATH_LEN = 0x4472, matching this phase's brief exactly,
+ *     field by field, through 0x4526)
+ *   sd2tnfs/romemul/include/commands.h            (command codes,
+ *     0x0413/0x0414/0x0415 confirmed)
+ *   sd2tnfs/romemul/include/sidetnfs_config.h     (drive status/type/
+ *     transport enum values)
+ *   sd2tnfs/romemul/include/sidetnfs_netconfig.h  (network status enum,
+ *     sidetnfs_network_config_t field order/sizes, 176-byte static_assert)
+ *   sd2tnfs/romemul/include/network.h             (MAX_SSID_LENGTH=36,
+ *     MAX_PASSWORD_LENGTH=68, IPV4_ADDRESS_LENGTH=16)
  *   sd2tnfs/romemul/include/memfunc.h             (WRITE_WORD,
  *     WRITE_AND_SWAP_LONGWORD, CHANGE_ENDIANESS_BLOCK16,
  *     COPY_AND_CHANGE_ENDIANESS_BLOCK16, GET_PAYLOAD_PARAM16/32)
- *   sd2tnfs/romemul/gemdrvemul.c                  (the six handlers --
- *     exact payloadPtr consumption order for SET_DRIVE)
+ *   sd2tnfs/romemul/gemdrvemul.c                  (all nine handlers --
+ *     exact payloadPtr consumption order for SET_DRIVE/SET_NETWORK_CONFIG,
+ *     and confirmation that GET/SET_NETWORK_CONFIG use the exact same
+ *     WRITE_AND_SWAP_LONGWORD/WRITE_WORD/CHANGE_ENDIANESS_BLOCK16 pattern
+ *     as the drive commands, not a new one)
  *   sidecart-gemdrive-atari/src/inc/sidecart_functions.s
  *     (send_sync_command_to_sidecart / send_sync_write_command_to_sidecart
  *     -- the proven 68k-side random-token handshake AND the proven
@@ -52,12 +65,15 @@
 #define ROM3_BASE            0xFB0000UL
 #define ROM3_PROTOCOL_HEADER 0xABCDUL /* CMD_MAGIC_NUMBER, gemdrive.s */
 
-#define CMD_GET_CONFIG_INFO  0x040DUL
-#define CMD_GET_DRIVE        0x040EUL
-#define CMD_SET_DRIVE        0x040FUL
-#define CMD_DELETE_DRIVE     0x0410UL
-#define CMD_SET_CONFIG_DRIVE 0x0411UL
-#define CMD_SAVE_CONFIG      0x0412UL
+#define CMD_GET_CONFIG_INFO     0x040DUL
+#define CMD_GET_DRIVE           0x040EUL
+#define CMD_SET_DRIVE           0x040FUL
+#define CMD_DELETE_DRIVE        0x0410UL
+#define CMD_SET_CONFIG_DRIVE    0x0411UL
+#define CMD_SAVE_CONFIG         0x0412UL
+#define CMD_GET_NETWORK_CONFIG  0x0413UL
+#define CMD_SET_NETWORK_CONFIG  0x0414UL
+#define CMD_SAVE_NETWORK_CONFIG 0x0415UL
 
 #define RANDOM_TOKEN_OFFSET      0x0000UL /* echoed token, polled after completion */
 #define RANDOM_TOKEN_SEED_OFFSET 0x0004UL /* Pico-published seed, read before sending */
@@ -89,6 +105,54 @@
 #define SET_DRIVE_PAYLOAD_BYTES \
     (4UL + 2UL*5UL + (unsigned long)SIDETNFS_NICKNAME_LEN + (unsigned long)SIDETNFS_HOST_LEN + \
      (unsigned long)SIDETNFS_MOUNTPATH_LEN + (unsigned long)SIDETNFS_SDPATH_LEN)
+
+/* Fase 11C (Pico alignment fix): the network block's base is no longer a
+ * hand-copied literal -- the Pico firmware now computes its own base as
+ * ALIGN4(end of drive block), because a uint32_t store to the previous,
+ * unaligned 0x4472 status offset was a HardFault (0x4472 is not a
+ * multiple of 4). Mirroring the exact same structural computation here,
+ * instead of re-copying a new literal, is what keeps the two sides from
+ * silently drifting apart again the next time the drive block's size
+ * changes. Every field below is derived from the previous field's own
+ * offset + length, also matching the Pico side field-by-field. */
+#define SIDETNFS_NETWORK_ALIGN4(value) (((value) + 3UL) & ~3UL)
+
+#define NET_BASE_UNALIGNED    (DRIVE_SD_PATH_OFFSET + (unsigned long)SIDETNFS_SDPATH_LEN)
+#define NET_STATUS_OFFSET     SIDETNFS_NETWORK_ALIGN4(NET_BASE_UNALIGNED)           /* uint32_t, swapped long */
+#define NET_AUTH_MODE_OFFSET  (NET_STATUS_OFFSET     + 4UL)                          /* uint16_t, plain word */
+#define NET_USE_DHCP_OFFSET   (NET_AUTH_MODE_OFFSET  + 2UL)                          /* uint16_t, plain word */
+#define NET_SSID_OFFSET       (NET_USE_DHCP_OFFSET   + 2UL)                          /* char[36] */
+#define NET_PASSWORD_OFFSET   (NET_SSID_OFFSET       + (unsigned long)SIDETNFS_NET_SSID_LEN)     /* char[68] */
+#define NET_COUNTRY_OFFSET    (NET_PASSWORD_OFFSET   + (unsigned long)SIDETNFS_NET_PASSWORD_LEN) /* char[4] */
+#define NET_IP_ADDRESS_OFFSET (NET_COUNTRY_OFFSET    + (unsigned long)SIDETNFS_NET_COUNTRY_LEN)  /* char[16] */
+#define NET_NETMASK_OFFSET    (NET_IP_ADDRESS_OFFSET + (unsigned long)SIDETNFS_NET_IPV4_LEN)     /* char[16] */
+#define NET_GATEWAY_OFFSET    (NET_NETMASK_OFFSET    + (unsigned long)SIDETNFS_NET_IPV4_LEN)     /* char[16] */
+#define NET_DNS_OFFSET        (NET_GATEWAY_OFFSET    + (unsigned long)SIDETNFS_NET_IPV4_LEN)     /* char[16] */
+#define NET_BLOCK_END         (NET_DNS_OFFSET        + (unsigned long)SIDETNFS_NET_IPV4_LEN)
+
+/* Compile-time cross-checks (confirmed to work with this exact toolchain,
+ * m68k-atari-mint-gcc 4.6.4, gnu89 defaults -- no -std=c11 needed here).
+ * These catch a future field-length change that would silently break
+ * hardware alignment or overflow the ROM3 window, without needing to run
+ * anything on real hardware to find out. */
+_Static_assert((NET_STATUS_OFFSET & 3UL) == 0UL, "NET_STATUS_OFFSET must be 4-byte aligned");
+_Static_assert((NET_AUTH_MODE_OFFSET & 1UL) == 0UL, "NET_AUTH_MODE_OFFSET must be 2-byte aligned");
+_Static_assert((NET_USE_DHCP_OFFSET & 1UL) == 0UL, "NET_USE_DHCP_OFFSET must be 2-byte aligned");
+_Static_assert((NET_SSID_OFFSET & 1UL) == 0UL, "NET_SSID_OFFSET must be 2-byte aligned");
+_Static_assert((NET_PASSWORD_OFFSET & 1UL) == 0UL, "NET_PASSWORD_OFFSET must be 2-byte aligned");
+_Static_assert((NET_COUNTRY_OFFSET & 1UL) == 0UL, "NET_COUNTRY_OFFSET must be 2-byte aligned");
+_Static_assert((NET_IP_ADDRESS_OFFSET & 1UL) == 0UL, "NET_IP_ADDRESS_OFFSET must be 2-byte aligned");
+_Static_assert((NET_NETMASK_OFFSET & 1UL) == 0UL, "NET_NETMASK_OFFSET must be 2-byte aligned");
+_Static_assert((NET_GATEWAY_OFFSET & 1UL) == 0UL, "NET_GATEWAY_OFFSET must be 2-byte aligned");
+_Static_assert((NET_DNS_OFFSET & 1UL) == 0UL, "NET_DNS_OFFSET must be 2-byte aligned");
+_Static_assert(NET_BLOCK_END <= 0x10000UL, "network block must fit the 64KB ROM3 window");
+
+/* SET_NETWORK_CONFIG request payload size, excluding the 4-byte token:
+ * auth_mode+use_dhcp(2 each=4) + strings (36+68+4+16*4=172) = 176 bytes,
+ * matching the brief exactly (no index field here, unlike SET_DRIVE). */
+#define SET_NETWORK_CONFIG_PAYLOAD_BYTES \
+    (2UL*2UL + (unsigned long)SIDETNFS_NET_SSID_LEN + (unsigned long)SIDETNFS_NET_PASSWORD_LEN + \
+     (unsigned long)SIDETNFS_NET_COUNTRY_LEN + 4UL*(unsigned long)SIDETNFS_NET_IPV4_LEN)
 
 #define PROBE_TIMEOUT_SEC      2
 #define SAVE_CONFIG_TIMEOUT_SEC 5 /* SAVE_CONFIG does real flash erase+program */
@@ -280,5 +344,61 @@ int sidetnfs_probe_save_config(unsigned long *out_status)
         return SIDETNFS_PROBE_TIMEOUT;
 
     *out_status = rom3_read_long(DRIVE_STATUS_OFFSET);
+    return SIDETNFS_PROBE_OK;
+}
+
+int sidetnfs_probe_get_network_config(SideTnfsNetworkConfig *info)
+{
+    unsigned long seed = send_command_start(CMD_GET_NETWORK_CONFIG, 0UL);
+
+    if (!wait_for_token(seed, PROBE_TIMEOUT_SEC))
+        return SIDETNFS_PROBE_TIMEOUT;
+
+    info->status    = rom3_read_long(NET_STATUS_OFFSET);
+    info->auth_mode = rom3_read_word(NET_AUTH_MODE_OFFSET);
+    info->use_dhcp  = rom3_read_word(NET_USE_DHCP_OFFSET);
+
+    read_string_field(NET_SSID_OFFSET,       info->ssid,        SIDETNFS_NET_SSID_LEN);
+    read_string_field(NET_PASSWORD_OFFSET,   info->password,    SIDETNFS_NET_PASSWORD_LEN);
+    read_string_field(NET_COUNTRY_OFFSET,    info->country,     SIDETNFS_NET_COUNTRY_LEN);
+    read_string_field(NET_IP_ADDRESS_OFFSET, info->ip_address,  SIDETNFS_NET_IPV4_LEN);
+    read_string_field(NET_NETMASK_OFFSET,    info->netmask,     SIDETNFS_NET_IPV4_LEN);
+    read_string_field(NET_GATEWAY_OFFSET,    info->gateway,     SIDETNFS_NET_IPV4_LEN);
+    read_string_field(NET_DNS_OFFSET,        info->primary_dns, SIDETNFS_NET_IPV4_LEN);
+    return SIDETNFS_PROBE_OK;
+}
+
+int sidetnfs_probe_set_network_config(const SideTnfsNetworkConfig *in, unsigned long *out_status)
+{
+    unsigned long seed = send_command_start(CMD_SET_NETWORK_CONFIG, SET_NETWORK_CONFIG_PAYLOAD_BYTES);
+
+    /* No index field here, unlike SET_DRIVE -- request starts directly
+     * with auth_mode/use_dhcp, matching GEMDRVEMUL_SIDETNFS_SET_NETWORK_CONFIG's
+     * payloadPtr consumption order exactly. */
+    send_param16(in->auth_mode);
+    send_param16(in->use_dhcp);
+    send_string_field(in->ssid,        SIDETNFS_NET_SSID_LEN);
+    send_string_field(in->password,    SIDETNFS_NET_PASSWORD_LEN);
+    send_string_field(in->country,     SIDETNFS_NET_COUNTRY_LEN);
+    send_string_field(in->ip_address,  SIDETNFS_NET_IPV4_LEN);
+    send_string_field(in->netmask,     SIDETNFS_NET_IPV4_LEN);
+    send_string_field(in->gateway,     SIDETNFS_NET_IPV4_LEN);
+    send_string_field(in->primary_dns, SIDETNFS_NET_IPV4_LEN);
+
+    if (!wait_for_token(seed, PROBE_TIMEOUT_SEC))
+        return SIDETNFS_PROBE_TIMEOUT;
+
+    *out_status = rom3_read_long(NET_STATUS_OFFSET);
+    return SIDETNFS_PROBE_OK;
+}
+
+int sidetnfs_probe_save_network_config(unsigned long *out_status)
+{
+    unsigned long seed = send_command_start(CMD_SAVE_NETWORK_CONFIG, 0UL);
+
+    if (!wait_for_token(seed, SAVE_CONFIG_TIMEOUT_SEC))
+        return SIDETNFS_PROBE_TIMEOUT;
+
+    *out_status = rom3_read_long(NET_STATUS_OFFSET);
     return SIDETNFS_PROBE_OK;
 }

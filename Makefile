@@ -11,7 +11,7 @@ CFLAGS     = -Wall -Wextra -O1 -m68000 -fno-strict-aliasing \
 LDFLAGS    = -s -lgem
 
 TARGET     = SIDETNFS.PRG
-SRCS       = src/main.c src/drive.c src/dialog.c src/sidetnfs_probe.c
+SRCS       = src/main.c src/drive.c src/netconfig.c src/dialog.c src/sidetnfs_probe.c
 INSTALLDIR = /mnt/retroloft/retro/Atari.ST/CONFIG
 
 # Files to copy on 'make install' (extend as the project grows)

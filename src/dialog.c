@@ -26,6 +26,7 @@
 #include <string.h>
 #include "dialog.h"
 #include "drive.h"
+#include "netconfig.h"
 #include "sidetnfs_probe.h"
 
 /* ================================================================== */
@@ -88,6 +89,35 @@ enum {
 };
 
 /* ================================================================== */
+/* WiFi/network settings editor (NC_*)                                 */
+/* Fase AC-5: local UI state only -- see netconfig.h. Country is a      */
+/* plain two-letter code field, validated and uppercased on OK (see     */
+/* nc_save_to_config()). DHCP/Static IP reuses the SELECTED-toggle       */
+/* radio-pair idiom already proven by the old profile-list row          */
+/* selection.                                                            */
+/* ================================================================== */
+enum {
+    NC_ROOT = 0,
+    NC_TITLE,
+    NC_DIV1,
+    NC_LBL_WIFI,
+    NC_LBL_SSID,     NC_SSID_EDIT,
+    NC_LBL_PASSWORD, NC_PASSWORD_EDIT,
+    NC_LBL_AUTH,     NC_AUTH_VAL, NC_AUTH_BTN,
+    NC_LBL_COUNTRY,  NC_COUNTRY_EDIT, NC_COUNTRY_HINT,
+    NC_DIV2,
+    NC_LBL_NETWORK,
+    NC_DHCP_BTN, NC_STATIC_BTN,
+    NC_LBL_IP,      NC_IP_EDIT,
+    NC_LBL_NETMASK, NC_NETMASK_EDIT,
+    NC_LBL_GATEWAY, NC_GATEWAY_EDIT,
+    NC_LBL_DNS,     NC_DNS_EDIT,
+    NC_DIV3,
+    NC_OK, NC_CANCEL,
+    NC_NOBJS
+};
+
+/* ================================================================== */
 /* Drive overview / main dialog (OV_*)                                 */
 /* ================================================================== */
 enum {
@@ -101,14 +131,49 @@ enum {
 #define OV_AFTER_ROWS  (OV_ROW_BASE + MAX_DRIVES*2)
 #define OV_DIV2   (OV_AFTER_ROWS + 0)
 #define OV_ADD    (OV_AFTER_ROWS + 1)
-#define OV_SAVE   (OV_AFTER_ROWS + 2)
+#define OV_OK     (OV_AFTER_ROWS + 2)
 #define OV_CANCEL (OV_AFTER_ROWS + 3)
 #define OV_NOBJS  (OV_AFTER_ROWS + 4)
+
+/* ================================================================== */
+/* Status window (SW_*) -- Fase AC-6                                    */
+/* The new top-level main window. The drive overview above (OV_*) is no */
+/* longer shown directly -- it becomes drives_window_run()'s own modal  */
+/* window, opened from here via the DRIVES button. All status text this */
+/* phase is a static placeholder (see status_refresh_network()/          */
+/* status_refresh_clock()); only "Active drives" reads real data, via   */
+/* the existing DriveConfig model. Meaning is never color-only (plain   */
+/* text + the existing thin-box dividers), so this is monochrome-safe.  */
+/* ================================================================== */
+enum {
+    SW_ROOT = 0,
+    SW_TITLE,
+    SW_DIV1,
+    SW_LBL_NETWORK,
+    SW_NET_LINE_0, SW_NET_LINE_1, SW_NET_LINE_2, SW_NET_LINE_3,
+    SW_DIV2,
+    SW_LBL_CLOCK,
+    SW_CLOCK_LINE_0, SW_CLOCK_LINE_1,
+    SW_DIV3,
+    SW_LBL_DRIVES,
+    SW_DRIVE_LINE_BASE
+};
+#define SW_NUM_DRIVE_LINES   5
+#define SW_DRIVE_LINE(i)     (SW_DRIVE_LINE_BASE + (i))
+#define SW_AFTER_DRIVE_LINES (SW_DRIVE_LINE_BASE + SW_NUM_DRIVE_LINES)
+#define SW_DIV4    (SW_AFTER_DRIVE_LINES + 0)
+#define SW_CONFIG  (SW_AFTER_DRIVE_LINES + 1)
+#define SW_DRIVES  (SW_AFTER_DRIVE_LINES + 2)
+#define SW_SAVE    (SW_AFTER_DRIVE_LINES + 3)
+#define SW_QUIT    (SW_AFTER_DRIVE_LINES + 4)
+#define SW_NOBJS   (SW_AFTER_DRIVE_LINES + 5)
 
 static OBJECT cl_dlg[CL_NOBJS];
 static OBJECT sd_dlg[SD_NOBJS];
 static OBJECT te_dlg[TE_NOBJS];
+static OBJECT nc_dlg[NC_NOBJS];
 static OBJECT ov_dlg[OV_NOBJS];
+static OBJECT sw_dlg[SW_NOBJS];
 
 /* ================================================================== */
 /* Shared editable-field buffers/TEDINFOs                              */
@@ -138,10 +203,82 @@ static char tmpl_mount[TE_BUF_MOUNT], vld_mount[TE_BUF_MOUNT];
 static TEDINFO ti_te_drive, ti_te_nick, ti_te_host, ti_te_port, ti_te_mount, ti_sd_path;
 
 /* ================================================================== */
+/* WiFi/network editable-field buffers/TEDINFOs (NC_*, Fase AC-5)      */
+/* Distinct field sizes from the drive editors above -- netconfig.h    */
+/* defines its own lengths, independent of drive.h.                    */
+/* ================================================================== */
+#define NC_BUF_SSID     NETCONFIG_SSID_LEN     /* 33 */
+#define NC_BUF_PASSWORD NETCONFIG_PASSWORD_LEN /* 64 */
+#define NC_BUF_COUNTRY  NETCONFIG_COUNTRY_LEN  /* 3: two letters + NUL */
+#define NC_BUF_IPV4     NETCONFIG_IPV4_LEN     /* 16, shared by all four IPv4 fields */
+
+static char buf_nc_ssid    [NC_BUF_SSID];
+static char buf_nc_password[NC_BUF_PASSWORD];
+static char buf_nc_country [NC_BUF_COUNTRY];
+static char buf_nc_ip      [NC_BUF_IPV4];
+static char buf_nc_netmask [NC_BUF_IPV4];
+static char buf_nc_gateway [NC_BUF_IPV4];
+static char buf_nc_dns     [NC_BUF_IPV4];
+
+static char tmpl_nc_ssid[NC_BUF_SSID],         vld_nc_ssid[NC_BUF_SSID];
+static char tmpl_nc_password[NC_BUF_PASSWORD], vld_nc_password[NC_BUF_PASSWORD];
+static char tmpl_nc_country[NC_BUF_COUNTRY],   vld_nc_country[NC_BUF_COUNTRY];
+static char tmpl_nc_ipv4[NC_BUF_IPV4],         vld_nc_ipv4[NC_BUF_IPV4];
+
+static TEDINFO ti_nc_ssid, ti_nc_password, ti_nc_country, ti_nc_ip, ti_nc_netmask, ti_nc_gateway, ti_nc_dns;
+
+/* Fase AC-4 (network protocol): four canonical auth-mode choices, cycled
+ * by NC_AUTH_BTN the same way the earlier (now-removed) Country cycle
+ * button worked. nc_auth_codes[] are the values actually written to the
+ * wire when the user changes the selection; auth_mode_to_index() maps
+ * the full 0-8 firmware range onto these four groups for display. */
+static const char *nc_auth_names[] = { "Open", "WPA/TKIP", "WPA2/AES", "WPA2 Mixed" };
+static const unsigned long nc_auth_codes[] = { 0UL, 1UL, 3UL, 6UL };
+#define NC_AUTH_OPTION_COUNT ((int)(sizeof(nc_auth_codes) / sizeof(nc_auth_codes[0])))
+#define NC_BUF_AUTH_VAL 12
+static char buf_nc_auth_val[NC_BUF_AUTH_VAL];
+static int nc_auth_index;             /* current display index while editing */
+static int nc_auth_touched;           /* did the user click Change this session? */
+static unsigned long nc_auth_original; /* raw value at load time, kept verbatim if untouched */
+
+/* Fase AC-4 (network protocol): the password field shows this fixed
+ * placeholder instead of the real value whenever one is already set --
+ * see the report for why this, not per-keystroke masking, is what this
+ * toolchain's TEDINFO can reliably do. If the buffer still equals this
+ * placeholder at OK time, the existing password is kept untouched;
+ * anything else typed replaces it. */
+static const char NC_PASSWORD_PLACEHOLDER[] = "********";
+
+static NetConfig g_netconfig;
+/* Snapshot of the last known-good (loaded-from-firmware or
+ * successfully-saved) network config, so Save can tell whether the user
+ * actually changed anything and skip SET/SAVE_NETWORK_CONFIG entirely
+ * when not -- see perform_save(). */
+static NetConfig g_netconfig_baseline;
+
+/* Remembers the outcome of the ONE-TIME network_startup_load() probe, so
+ * status_refresh_network() can describe it without ever calling
+ * sidetnfs_probe_get_network_config() again -- GET_NETWORK_CONFIG/0x0413
+ * is only ever sent once, at startup. */
+#define NETLOAD_OK          0 /* probe answered OK; g_netconfig is real firmware data */
+#define NETLOAD_UNAVAILABLE 1 /* probe timed out -- no firmware / offline, same as the drive protocol's fallback */
+#define NETLOAD_BAD_STATUS  2 /* probe answered but the firmware status was not OK */
+static int g_netconfig_load_state = NETLOAD_UNAVAILABLE;
+static unsigned long g_netconfig_load_fw_status = SIDETNFS_NETCONFIG_STATUS_OK; /* only meaningful when load_state == NETLOAD_BAD_STATUS */
+
+/* ================================================================== */
 /* Drive-overview row text buffers                                     */
 /* ================================================================== */
 #define OV_ROW_BUF 40
 static char ov_row_text[MAX_DRIVES][OV_ROW_BUF];
+
+/* ================================================================== */
+/* Status window text buffers (Fase AC-6)                              */
+/* ================================================================== */
+#define SW_LINE_BUF 48
+static char sw_net_line[4][SW_LINE_BUF];
+static char sw_clock_line[2][SW_LINE_BUF];
+static char sw_drive_line[SW_NUM_DRIVE_LINES][SW_LINE_BUF];
 
 /* ================================================================== */
 /* Shared helpers                                                      */
@@ -256,6 +393,25 @@ static void shared_fields_init(void)
     init_ti(&ti_te_port,  buf_te_port,  tmpl_port,  vld_port,  TE_BUF_PORT);
     init_ti(&ti_te_mount, buf_te_mount, tmpl_mount, vld_mount, TE_BUF_MOUNT);
     init_ti(&ti_sd_path,  buf_sd_path,  tmpl_host,  vld_host,  TE_BUF_SDPATH);
+
+    /* Fase AC-5: plain free-text validation ('X'), same convention as
+     * host/mount_path above -- no character-class masking for IPv4
+     * octets or the password field, consistent with the rest of this
+     * file and with "no extensive validation yet" for this phase. */
+    fill_n(tmpl_nc_ssid,     '_', NC_BUF_SSID     - 1); fill_n(vld_nc_ssid,     'X', NC_BUF_SSID     - 1);
+    fill_n(tmpl_nc_password, '_', NC_BUF_PASSWORD - 1); fill_n(vld_nc_password, 'X', NC_BUF_PASSWORD - 1);
+    fill_n(tmpl_nc_country,  '_', NC_BUF_COUNTRY  - 1); fill_n(vld_nc_country,  'X', NC_BUF_COUNTRY  - 1);
+    fill_n(tmpl_nc_ipv4,     '_', NC_BUF_IPV4     - 1); fill_n(vld_nc_ipv4,     'X', NC_BUF_IPV4     - 1);
+
+    init_ti(&ti_nc_ssid,     buf_nc_ssid,     tmpl_nc_ssid,     vld_nc_ssid,     NC_BUF_SSID);
+    init_ti(&ti_nc_password, buf_nc_password, tmpl_nc_password, vld_nc_password, NC_BUF_PASSWORD);
+    init_ti(&ti_nc_country,  buf_nc_country,  tmpl_nc_country,  vld_nc_country,  NC_BUF_COUNTRY);
+    init_ti(&ti_nc_ip,       buf_nc_ip,       tmpl_nc_ipv4,     vld_nc_ipv4,     NC_BUF_IPV4);
+    init_ti(&ti_nc_netmask,  buf_nc_netmask,  tmpl_nc_ipv4,     vld_nc_ipv4,     NC_BUF_IPV4);
+    init_ti(&ti_nc_gateway,  buf_nc_gateway,  tmpl_nc_ipv4,     vld_nc_ipv4,     NC_BUF_IPV4);
+    init_ti(&ti_nc_dns,      buf_nc_dns,      tmpl_nc_ipv4,     vld_nc_ipv4,     NC_BUF_IPV4);
+
+    netconfig_init_defaults(&g_netconfig);
 }
 
 static const char *drive_type_name(DriveType t)
@@ -642,6 +798,207 @@ static int save_to_firmware(const DriveConfig *cfg, char *msg)
 }
 
 /* ================================================================== */
+/* Wire <-> UI network-config translation (Fase AC-4, network protocol) */
+/* Explicit field-by-field, same reasoning as wire_to_ui_drive() above:  */
+/* never memcpy() between the wire struct and the UI struct. country is */
+/* the one field with a real size difference (wire char[4] vs UI        */
+/* char[3]/2 letters) -- both directions truncate/zero-pad safely via   */
+/* strncpy + the destination's own prior memset/NUL.                    */
+/* ================================================================== */
+
+static void wire_to_ui_netconfig(const SideTnfsNetworkConfig *w, NetConfig *nc)
+{
+    memset(nc, 0, sizeof(*nc));
+    nc->auth_mode = w->auth_mode;
+    nc->ip_mode   = (w->use_dhcp != 0UL) ? NETCONFIG_MODE_DHCP : NETCONFIG_MODE_STATIC;
+
+    strncpy(nc->ssid,       w->ssid,        NETCONFIG_SSID_LEN - 1);
+    strncpy(nc->password,   w->password,    NETCONFIG_PASSWORD_LEN - 1);
+    strncpy(nc->country,    w->country,     NETCONFIG_COUNTRY_LEN - 1); /* wire[4] -> UI[3]: first 2 letters */
+    strncpy(nc->ip_address, w->ip_address,  NETCONFIG_IPV4_LEN - 1);
+    strncpy(nc->netmask,    w->netmask,     NETCONFIG_IPV4_LEN - 1);
+    strncpy(nc->gateway,    w->gateway,     NETCONFIG_IPV4_LEN - 1);
+    strncpy(nc->dns_server, w->primary_dns, NETCONFIG_IPV4_LEN - 1);
+}
+
+static void ui_to_wire_netconfig(const NetConfig *nc, SideTnfsNetworkConfig *w)
+{
+    memset(w, 0, sizeof(*w));
+    w->auth_mode = nc->auth_mode;
+    w->use_dhcp  = (nc->ip_mode == NETCONFIG_MODE_DHCP) ? 1UL : 0UL;
+
+    strncpy(w->ssid,        nc->ssid,       SIDETNFS_NET_SSID_LEN - 1);
+    strncpy(w->password,    nc->password,   SIDETNFS_NET_PASSWORD_LEN - 1);
+    strncpy(w->country,     nc->country,    SIDETNFS_NET_COUNTRY_LEN - 1); /* UI[3] -> wire[4]: rest stays NUL */
+    strncpy(w->ip_address,  nc->ip_address, SIDETNFS_NET_IPV4_LEN - 1);
+    strncpy(w->netmask,     nc->netmask,    SIDETNFS_NET_IPV4_LEN - 1);
+    strncpy(w->gateway,     nc->gateway,    SIDETNFS_NET_IPV4_LEN - 1);
+    strncpy(w->primary_dns, nc->dns_server, SIDETNFS_NET_IPV4_LEN - 1);
+}
+
+static const char *netconfig_status_text(unsigned long status)
+{
+    switch (status) {
+    case SIDETNFS_NETCONFIG_STATUS_OK:                  return "OK.";
+    case SIDETNFS_NETCONFIG_STATUS_INVALID_SSID:        return "Invalid SSID.";
+    case SIDETNFS_NETCONFIG_STATUS_INVALID_PASSWORD:    return "Invalid password.";
+    case SIDETNFS_NETCONFIG_STATUS_INVALID_AUTH_MODE:   return "Invalid authentication mode.";
+    case SIDETNFS_NETCONFIG_STATUS_INVALID_COUNTRY:     return "Invalid country code.";
+    case SIDETNFS_NETCONFIG_STATUS_INVALID_DHCP:        return "Invalid DHCP setting.";
+    case SIDETNFS_NETCONFIG_STATUS_INVALID_IP:          return "Invalid IP address.";
+    case SIDETNFS_NETCONFIG_STATUS_INVALID_NETMASK:     return "Invalid netmask.";
+    case SIDETNFS_NETCONFIG_STATUS_INVALID_GATEWAY:     return "Invalid gateway.";
+    case SIDETNFS_NETCONFIG_STATUS_INVALID_DNS:         return "Invalid DNS server.";
+    case SIDETNFS_NETCONFIG_STATUS_NOT_STAGED:          return "No config staged.";
+    case SIDETNFS_NETCONFIG_STATUS_FLASH_WRITE_FAILED:  return "Flash write failed.";
+    case SIDETNFS_NETCONFIG_STATUS_FLASH_VERIFY_FAILED: return "Flash verify failed.";
+    default:                                            return "Unknown status.";
+    }
+}
+
+/* Silent building block, same shape as fetch_drive_config_from_firmware():
+ * returns 1 on a fully consistent OK read, 0 on timeout or any non-OK
+ * status -- *out is left untouched on failure. */
+static int fetch_network_config_from_firmware(NetConfig *out)
+{
+    SideTnfsNetworkConfig wire;
+
+    if (sidetnfs_probe_get_network_config(&wire) != SIDETNFS_PROBE_OK)
+        return 0;
+    if (wire.status != SIDETNFS_NETCONFIG_STATUS_OK)
+        return 0;
+
+    wire_to_ui_netconfig(&wire, out);
+    return 1;
+}
+
+/* Field-by-field local validation, mirroring validate_drive()'s shape.
+ * The country code itself is already enforced at OK time by
+ * nc_save_to_config(), this is the same defensive re-check pattern
+ * validate_drive() applies at Save time too. */
+static int validate_netconfig(const NetConfig *nc, char *msg)
+{
+    if (!buf_nonempty(nc->ssid)) {
+        sprintf(msg, "[3][Validation error|SSID is empty.][OK]");
+        return 0;
+    }
+    if (strlen(nc->country) != 2) {
+        sprintf(msg, "[3][Validation error|Country code must contain|exactly two letters.][OK]");
+        return 0;
+    }
+    if (nc->ip_mode == NETCONFIG_MODE_STATIC) {
+        if (!buf_nonempty(nc->ip_address)) {
+            sprintf(msg, "[3][Validation error|Static IP: IP address is empty.][OK]");
+            return 0;
+        }
+        if (!buf_nonempty(nc->netmask)) {
+            sprintf(msg, "[3][Validation error|Static IP: netmask is empty.][OK]");
+            return 0;
+        }
+        if (!buf_nonempty(nc->gateway)) {
+            sprintf(msg, "[3][Validation error|Static IP: gateway is empty.][OK]");
+            return 0;
+        }
+        if (!buf_nonempty(nc->dns_server)) {
+            sprintf(msg, "[3][Validation error|Static IP: DNS server is empty.][OK]");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* 1 if any field differs -- drives Save's "only save network config if
+ * the user actually changed it" requirement. Deliberately compares the
+ * real password (both sides hold it, masking is a display-only concern
+ * in nc_load_from_config()/nc_save_to_config()). */
+static int netconfig_changed(const NetConfig *a, const NetConfig *b)
+{
+    if (strcmp(a->ssid, b->ssid) != 0) return 1;
+    if (strcmp(a->password, b->password) != 0) return 1;
+    if (a->auth_mode != b->auth_mode) return 1;
+    if (strcmp(a->country, b->country) != 0) return 1;
+    if (a->ip_mode != b->ip_mode) return 1;
+    if (strcmp(a->ip_address, b->ip_address) != 0) return 1;
+    if (strcmp(a->netmask, b->netmask) != 0) return 1;
+    if (strcmp(a->gateway, b->gateway) != 0) return 1;
+    if (strcmp(a->dns_server, b->dns_server) != 0) return 1;
+    return 0;
+}
+
+/* Fase AC-4 (network protocol): SET_NETWORK_CONFIG, then
+ * SAVE_NETWORK_CONFIG, then a full GET_NETWORK_CONFIG readback +
+ * compare -- same "stop at the first failure, never partially applied"
+ * shape as save_to_firmware(). Never calls SAVE_NETWORK_CONFIG if
+ * SET_NETWORK_CONFIG failed; on any failure *nc (the caller's live
+ * g_netconfig) is never touched here, so a failed save cannot silently
+ * replace the local UI values. */
+static int save_network_to_firmware(const NetConfig *nc, char *msg)
+{
+    SideTnfsNetworkConfig wire;
+    unsigned long status;
+    NetConfig readback;
+
+    ui_to_wire_netconfig(nc, &wire);
+
+    if (sidetnfs_probe_set_network_config(&wire, &status) != SIDETNFS_PROBE_OK) {
+        sprintf(msg, "[3][Network save failed|SET_NETWORK_CONFIG timed out.|Nothing was saved.][OK]");
+        return 0;
+    }
+    if (status != SIDETNFS_NETCONFIG_STATUS_OK) {
+        sprintf(msg, "[3][Network save failed|%s|Nothing was saved.][OK]", netconfig_status_text(status));
+        return 0;
+    }
+
+    if (sidetnfs_probe_save_network_config(&status) != SIDETNFS_PROBE_OK) {
+        sprintf(msg, "[3][Network save failed|SAVE_NETWORK_CONFIG timed out.|Nothing was saved.][OK]");
+        return 0;
+    }
+    if (status != SIDETNFS_NETCONFIG_STATUS_OK) {
+        sprintf(msg, "[3][Network save failed|%s][OK]", netconfig_status_text(status));
+        return 0;
+    }
+
+    if (!fetch_network_config_from_firmware(&readback)) {
+        sprintf(msg, "[3][Network save verification failed|Could not read back|the saved configuration.][OK]");
+        return 0;
+    }
+    if (netconfig_changed(nc, &readback)) {
+        sprintf(msg, "[3][Network save verification failed|Flash contents do not match|the edited settings.][OK]");
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Fase AC-4 (network protocol): startup counterpart to
+ * dialog_startup_load(), called right after it regardless of whether a
+ * drive-list firmware was found -- a timeout here gets the same silent
+ * offline/fallback treatment (g_netconfig keeps its built-in defaults);
+ * a reply with a non-OK status is visibly reported, since that is not
+ * the normal offline case. Either way g_netconfig_baseline is set equal
+ * to g_netconfig afterwards, so Save does not fire a spurious network
+ * save for a session that never touched the Config dialog. */
+static void network_startup_load(void)
+{
+    SideTnfsNetworkConfig wire;
+    int result = sidetnfs_probe_get_network_config(&wire);
+
+    if (result == SIDETNFS_PROBE_OK && wire.status == SIDETNFS_NETCONFIG_STATUS_OK) {
+        wire_to_ui_netconfig(&wire, &g_netconfig);
+        g_netconfig_load_state = NETLOAD_OK;
+    } else if (result == SIDETNFS_PROBE_OK) {
+        char msg[100];
+        g_netconfig_load_state     = NETLOAD_BAD_STATUS;
+        g_netconfig_load_fw_status = wire.status;
+        sprintf(msg, "[3][SideTNFS network config|%s][OK]", netconfig_status_text(wire.status));
+        form_alert(1, msg);
+    } else {
+        g_netconfig_load_state = NETLOAD_UNAVAILABLE;
+    }
+    g_netconfig_baseline = g_netconfig;
+}
+
+/* ================================================================== */
 /* Config-drive-letter editor                                          */
 /* Only the drive letter is editable; nickname/type are fixed context. */
 /* No Test, no Delete -- the config drive can never be removed.        */
@@ -669,12 +1026,12 @@ static void cl_dialog_init(void)
 
     yt    = tm;
     ydiv1 = yt + rh + 1;
-    ynick = ydiv1 + 2;
+    ynick = ydiv1 + 5;
     ytype = ynick + pitch;
     ydrv  = ytype + pitch;
     ydiv2 = ydrv + rh + 2;
-    ybtn  = ydiv2 + 4;
-    DH    = ybtn + rh + tm;
+    ybtn  = ydiv2 + 7;
+    DH    = ybtn + rh + tm + 3;
 
     set_obj(cl_dlg, CL_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
     cl_dlg[CL_ROOT].ob_spec.index = 0x00031070L;
@@ -788,12 +1145,12 @@ static void sd_dialog_init(int show_delete)
 
     yt    = tm;
     ydiv1 = yt + rh + 1;
-    ydrv  = ydiv1 + 2;
+    ydrv  = ydiv1 + 5;
     ynick = ydrv + pitch;
     ypath = ynick + pitch;
     ydiv2 = ypath + rh + 2;
-    ybtn  = ydiv2 + 4;
-    DH    = ybtn + rh + tm;
+    ybtn  = ydiv2 + 7;
+    DH    = ybtn + rh + tm + 3;
 
     set_obj(sd_dlg, SD_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
     sd_dlg[SD_ROOT].ob_spec.index = 0x00031070L;
@@ -948,7 +1305,7 @@ static void te_dialog_init(int show_delete)
 
     yt         = tm;
     ydiv1      = yt + rh + 1;
-    ydrv       = ydiv1 + 2;
+    ydrv       = ydiv1 + 5;
     ynick      = ydrv + pitch;
     yhost      = ynick + pitch;
     yport      = yhost + pitch;
@@ -956,8 +1313,8 @@ static void te_dialog_init(int show_delete)
     ymount     = ytrans + pitch;
     ymounthint = ymount + pitch;
     ydiv2      = ymounthint + rh + 2;
-    ybtn       = ydiv2 + 4;
-    DH         = ybtn + rh + tm;
+    ybtn       = ydiv2 + 7;
+    DH         = ybtn + rh + tm + 3;
 
     set_obj(te_dlg, TE_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
     te_dlg[TE_ROOT].ob_spec.index = 0x00031070L;
@@ -1175,8 +1532,8 @@ static int add_disk_type_run(void)
     DW    = 30 * cw;
     yt    = tm;
     ydiv1 = yt + rh + 1;
-    ybtn  = ydiv1 + 4;
-    DH    = ybtn + rh + tm;
+    ybtn  = ydiv1 + 7;
+    DH    = ybtn + rh + tm + 3;
 
     set_obj(ad_dlg, AD_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
     ad_dlg[AD_ROOT].ob_spec.index = 0x00031070L;
@@ -1215,6 +1572,365 @@ static int add_disk_type_run(void)
 }
 
 /* ================================================================== */
+/* WiFi/network settings editor (Fase AC-5)                            */
+/* UI only: no firmware read/write, no flash, no file. OK copies the   */
+/* edit buffers into *nc; Cancel (or ESC, see netconfig_editor_run())  */
+/* leaves *nc untouched -- same "temporary working buffers, committed  */
+/* only on OK" idiom as the drive editors above.                       */
+/* ================================================================== */
+
+static void nc_dialog_init(void)
+{
+    short cw, ch, bw, bh;
+    short sx, sy, sw, sh;
+    int rh, tm, pitch;
+    int DW, DH, xl, xf;
+    int yt, ydiv1, ylblwifi, yssid, ypassword, yauth, ycountry, ydiv2,
+        ylblnet, ymode, yip, ynetmask, ygateway, ydns, ydiv3, ybtn;
+
+    graf_handle(&cw, &ch, &bw, &bh);
+    wind_get(0, WF_WORKXYWH, &sx, &sy, &sw, &sh);
+    if (sh <= 0 || sh > 800) sh = 200;
+
+    rh    = (sh >= 350) ? (int)ch : ((ch > 8) ? ch / 2 : (int)ch);
+    tm    = (rh / 4 > 2) ? rh / 4 : 2;
+    pitch = rh + 3;
+
+    DW = 50 * cw;
+    xl = 2 * cw;
+    xf = 13 * cw;
+
+    yt        = tm;
+    ydiv1     = yt + rh + 1;
+    ylblwifi  = ydiv1 + 5;
+    yssid     = ylblwifi + pitch;
+    ypassword = yssid + pitch;
+    yauth     = ypassword + pitch;
+    ycountry  = yauth + pitch;
+    ydiv2     = ycountry + rh + 2;
+    ylblnet   = ydiv2 + 2;
+    ymode     = ylblnet + pitch;
+    yip       = ymode + pitch;
+    ynetmask  = yip + pitch;
+    ygateway  = ynetmask + pitch;
+    ydns      = ygateway + pitch;
+    ydiv3     = ydns + rh + 2;
+    ybtn      = ydiv3 + 7;
+    DH        = ybtn + rh + tm + 3;
+
+    set_obj(nc_dlg, NC_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
+    nc_dlg[NC_ROOT].ob_spec.index = 0x00031070L;
+
+    set_obj(nc_dlg, NC_TITLE, G_STRING, NONE, NORMAL, 15*cw, yt, 20*cw, rh);
+    nc_dlg[NC_TITLE].ob_spec.free_string = "Network Settings";
+
+    set_obj(nc_dlg, NC_DIV1, G_BOX, NONE, NORMAL, cw, ydiv1, DW - 2*cw, 2);
+    nc_dlg[NC_DIV1].ob_spec.index = 0x00001171L;
+
+    set_obj(nc_dlg, NC_LBL_WIFI, G_STRING, NONE, NORMAL, xl, ylblwifi, 10*cw, rh);
+    nc_dlg[NC_LBL_WIFI].ob_spec.free_string = "WiFi";
+
+    set_obj(nc_dlg, NC_LBL_SSID, G_STRING, NONE, NORMAL, xl, yssid, 11*cw, rh);
+    nc_dlg[NC_LBL_SSID].ob_spec.free_string = "SSID:";
+    set_obj(nc_dlg, NC_SSID_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, yssid, 23*cw, rh);
+    nc_dlg[NC_SSID_EDIT].ob_spec.tedinfo = &ti_nc_ssid;
+
+    set_obj(nc_dlg, NC_LBL_PASSWORD, G_STRING, NONE, NORMAL, xl, ypassword, 11*cw, rh);
+    nc_dlg[NC_LBL_PASSWORD].ob_spec.free_string = "Password:";
+    set_obj(nc_dlg, NC_PASSWORD_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, ypassword, 23*cw, rh);
+    nc_dlg[NC_PASSWORD_EDIT].ob_spec.tedinfo = &ti_nc_password;
+
+    set_obj(nc_dlg, NC_LBL_AUTH, G_STRING, NONE, NORMAL, xl, yauth, 11*cw, rh);
+    nc_dlg[NC_LBL_AUTH].ob_spec.free_string = "Auth:";
+    set_obj(nc_dlg, NC_AUTH_VAL, G_STRING, NONE, NORMAL, xf, yauth, 11*cw, rh);
+    nc_dlg[NC_AUTH_VAL].ob_spec.free_string = buf_nc_auth_val;
+    set_obj(nc_dlg, NC_AUTH_BTN, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, xf + 12*cw, yauth, 9*cw, rh);
+    nc_dlg[NC_AUTH_BTN].ob_spec.free_string = " Change  ";
+
+    set_obj(nc_dlg, NC_LBL_COUNTRY, G_STRING, NONE, NORMAL, xl, ycountry, 11*cw, rh);
+    nc_dlg[NC_LBL_COUNTRY].ob_spec.free_string = "Country:";
+    set_obj(nc_dlg, NC_COUNTRY_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, ycountry, 2*cw, rh);
+    nc_dlg[NC_COUNTRY_EDIT].ob_spec.tedinfo = &ti_nc_country;
+    set_obj(nc_dlg, NC_COUNTRY_HINT, G_STRING, NONE, NORMAL, xf + 3*cw, ycountry, 20*cw, rh);
+    nc_dlg[NC_COUNTRY_HINT].ob_spec.free_string = "(XX for worldwide)";
+
+    set_obj(nc_dlg, NC_DIV2, G_BOX, NONE, NORMAL, cw, ydiv2, DW - 2*cw, 2);
+    nc_dlg[NC_DIV2].ob_spec.index = 0x00001171L;
+
+    set_obj(nc_dlg, NC_LBL_NETWORK, G_STRING, NONE, NORMAL, xl, ylblnet, 10*cw, rh);
+    nc_dlg[NC_LBL_NETWORK].ob_spec.free_string = "Network";
+
+    /* DHCP/Static IP: manual mutually-exclusive SELECTED pair, same
+     * EXIT|TOUCHEXIT-plus-manual-ob_state technique the old profile-list
+     * row selection used -- no SELECTABLE flag, since that would let GEM
+     * auto-toggle the bit too and race with the manual handling below. */
+    set_obj(nc_dlg, NC_DHCP_BTN, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, xf, ymode, 8*cw, rh);
+    nc_dlg[NC_DHCP_BTN].ob_spec.free_string = "  DHCP  ";
+    set_obj(nc_dlg, NC_STATIC_BTN, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, xf + 9*cw, ymode, 12*cw, rh);
+    nc_dlg[NC_STATIC_BTN].ob_spec.free_string = " Static IP  ";
+
+    set_obj(nc_dlg, NC_LBL_IP, G_STRING, NONE, NORMAL, xl, yip, 11*cw, rh);
+    nc_dlg[NC_LBL_IP].ob_spec.free_string = "IP address:";
+    set_obj(nc_dlg, NC_IP_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, yip, 15*cw, rh);
+    nc_dlg[NC_IP_EDIT].ob_spec.tedinfo = &ti_nc_ip;
+
+    set_obj(nc_dlg, NC_LBL_NETMASK, G_STRING, NONE, NORMAL, xl, ynetmask, 11*cw, rh);
+    nc_dlg[NC_LBL_NETMASK].ob_spec.free_string = "Netmask:";
+    set_obj(nc_dlg, NC_NETMASK_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, ynetmask, 15*cw, rh);
+    nc_dlg[NC_NETMASK_EDIT].ob_spec.tedinfo = &ti_nc_netmask;
+
+    set_obj(nc_dlg, NC_LBL_GATEWAY, G_STRING, NONE, NORMAL, xl, ygateway, 11*cw, rh);
+    nc_dlg[NC_LBL_GATEWAY].ob_spec.free_string = "Gateway:";
+    set_obj(nc_dlg, NC_GATEWAY_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, ygateway, 15*cw, rh);
+    nc_dlg[NC_GATEWAY_EDIT].ob_spec.tedinfo = &ti_nc_gateway;
+
+    set_obj(nc_dlg, NC_LBL_DNS, G_STRING, NONE, NORMAL, xl, ydns, 11*cw, rh);
+    nc_dlg[NC_LBL_DNS].ob_spec.free_string = "DNS server:";
+    set_obj(nc_dlg, NC_DNS_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, ydns, 15*cw, rh);
+    nc_dlg[NC_DNS_EDIT].ob_spec.tedinfo = &ti_nc_dns;
+
+    set_obj(nc_dlg, NC_DIV3, G_BOX, NONE, NORMAL, cw, ydiv3, DW - 2*cw, 2);
+    nc_dlg[NC_DIV3].ob_spec.index = 0x00001171L;
+
+    set_obj(nc_dlg, NC_OK, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, 15*cw, ybtn, 8*cw, rh);
+    nc_dlg[NC_OK].ob_spec.free_string = "   OK   ";
+
+    set_obj(nc_dlg, NC_CANCEL, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 26*cw, ybtn, 8*cw, rh);
+    nc_dlg[NC_CANCEL].ob_spec.free_string = " Cancel ";
+
+    wire_tree(nc_dlg, NC_NOBJS);
+
+    (void)sx; (void)sy; (void)sw; (void)bw; (void)bh;
+}
+
+/* Enables/disables the four IPv4 fields to match the selected mode --
+ * DISABLED objects are both greyed out by objc_draw() and skipped by
+ * form_do(), so this alone satisfies "visibly unavailable" and
+ * "not editable" at once. */
+static void nc_apply_ip_field_state(int ip_mode)
+{
+    if (ip_mode == NETCONFIG_MODE_STATIC) {
+        nc_dlg[NC_IP_EDIT].ob_state      &= (unsigned short)(~DISABLED);
+        nc_dlg[NC_NETMASK_EDIT].ob_state &= (unsigned short)(~DISABLED);
+        nc_dlg[NC_GATEWAY_EDIT].ob_state &= (unsigned short)(~DISABLED);
+        nc_dlg[NC_DNS_EDIT].ob_state     &= (unsigned short)(~DISABLED);
+    } else {
+        nc_dlg[NC_IP_EDIT].ob_state      |= (unsigned short)DISABLED;
+        nc_dlg[NC_NETMASK_EDIT].ob_state |= (unsigned short)DISABLED;
+        nc_dlg[NC_GATEWAY_EDIT].ob_state |= (unsigned short)DISABLED;
+        nc_dlg[NC_DNS_EDIT].ob_state     |= (unsigned short)DISABLED;
+    }
+}
+
+/* Maps the full 0-8 firmware auth_mode range onto the four canonical UI
+ * groups (see nc_auth_names[]/nc_auth_codes[]): 0=Open, 1-2=WPA/TKIP,
+ * 3-5=WPA2/AES, 6-8=WPA2 Mixed. Anything else (should not happen; the
+ * firmware validates auth_mode <= 8) falls back to WPA2/AES. */
+static int auth_mode_to_index(unsigned long auth_mode)
+{
+    if (auth_mode == 0UL) return 0;
+    if (auth_mode == 1UL || auth_mode == 2UL) return 1;
+    if (auth_mode >= 3UL && auth_mode <= 5UL) return 2;
+    if (auth_mode >= 6UL && auth_mode <= 8UL) return 3;
+    return 2;
+}
+
+static void nc_load_from_config(const NetConfig *nc)
+{
+    set_buf(buf_nc_ssid, NC_BUF_SSID, nc->ssid);
+
+    /* Password masking: this toolchain's TEDINFO has no confirmed
+     * per-keystroke masking (see report), so a fixed placeholder is
+     * shown instead of the real value whenever one is already set; an
+     * empty stored password shows an empty field. nc_save_to_config()
+     * only overwrites nc->password if the buffer no longer equals this
+     * exact placeholder at OK time. */
+    if (nc->password[0] != '\0')
+        set_buf(buf_nc_password, NC_BUF_PASSWORD, NC_PASSWORD_PLACEHOLDER);
+    else
+        buf_nc_password[0] = '\0';
+
+    nc_auth_original = nc->auth_mode;
+    nc_auth_touched   = 0;
+    nc_auth_index     = auth_mode_to_index(nc->auth_mode);
+    /* Space-padded to the full field width: G_STRING objects do not
+     * clear their background before drawing, so a shorter new value
+     * would leave trailing characters of a longer previous one behind. */
+    sprintf(buf_nc_auth_val, "%-11.11s", nc_auth_names[nc_auth_index]);
+
+    set_buf(buf_nc_country,  NC_BUF_COUNTRY,  nc->country);
+    set_buf(buf_nc_ip,       NC_BUF_IPV4,     nc->ip_address);
+    set_buf(buf_nc_netmask,  NC_BUF_IPV4,     nc->netmask);
+    set_buf(buf_nc_gateway,  NC_BUF_IPV4,     nc->gateway);
+    set_buf(buf_nc_dns,      NC_BUF_IPV4,     nc->dns_server);
+
+    if (nc->ip_mode == NETCONFIG_MODE_STATIC) {
+        nc_dlg[NC_STATIC_BTN].ob_state |= (unsigned short)SELECTED;
+        nc_dlg[NC_DHCP_BTN].ob_state   &= (unsigned short)(~SELECTED);
+    } else {
+        nc_dlg[NC_DHCP_BTN].ob_state   |= (unsigned short)SELECTED;
+        nc_dlg[NC_STATIC_BTN].ob_state &= (unsigned short)(~SELECTED);
+    }
+    nc_apply_ip_field_state(nc->ip_mode);
+}
+
+/* Returns 1 on success (fields copied into *nc), 0 if the country code
+ * is invalid -- *nc is left untouched on failure, same "reject and stay
+ * open" pattern as validate_drive() elsewhere in this file. */
+static int nc_save_to_config(NetConfig *nc)
+{
+    char code[NC_BUF_COUNTRY];
+    int len;
+
+    /* buf_copy() strips the trailing spaces GEM pads editable fields
+     * with, same as every other text field in this file. */
+    buf_copy(buf_nc_country, code, sizeof(code));
+    len = (int)strlen(code);
+    if (len == 2 && code[0] >= 'a' && code[0] <= 'z') code[0] = (char)(code[0] - 'a' + 'A');
+    if (len == 2 && code[1] >= 'a' && code[1] <= 'z') code[1] = (char)(code[1] - 'a' + 'A');
+
+    if (len != 2 || code[0] < 'A' || code[0] > 'Z' || code[1] < 'A' || code[1] > 'Z') {
+        form_alert(1, "[3][Validation error|Country code must contain|exactly two letters.][OK]");
+        return 0;
+    }
+
+    buf_copy(buf_nc_ssid,     nc->ssid,       NETCONFIG_SSID_LEN);
+
+    /* Only replace the stored password if the field no longer reads as
+     * the untouched placeholder -- see nc_load_from_config(). */
+    {
+        char pw[NC_BUF_PASSWORD];
+        buf_copy(buf_nc_password, pw, sizeof(pw));
+        if (strcmp(pw, NC_PASSWORD_PLACEHOLDER) != 0) {
+            strncpy(nc->password, pw, NETCONFIG_PASSWORD_LEN - 1);
+            nc->password[NETCONFIG_PASSWORD_LEN - 1] = '\0';
+        }
+    }
+
+    buf_copy(buf_nc_ip,       nc->ip_address, NETCONFIG_IPV4_LEN);
+    buf_copy(buf_nc_netmask,  nc->netmask,    NETCONFIG_IPV4_LEN);
+    buf_copy(buf_nc_gateway,  nc->gateway,    NETCONFIG_IPV4_LEN);
+    buf_copy(buf_nc_dns,      nc->dns_server, NETCONFIG_IPV4_LEN);
+
+    nc->country[0] = code[0];
+    nc->country[1] = code[1];
+    nc->country[2] = '\0';
+
+    /* Canonical code only when the user actually cycled Change this
+     * session; otherwise keep whatever raw value was loaded, even if it
+     * is a non-canonical member of the same group (e.g. 4). */
+    nc->auth_mode = nc_auth_touched ? nc_auth_codes[nc_auth_index] : nc_auth_original;
+
+    nc->ip_mode = (nc_dlg[NC_STATIC_BTN].ob_state & SELECTED)
+                      ? NETCONFIG_MODE_STATIC : NETCONFIG_MODE_DHCP;
+    return 1;
+}
+
+/* Redraws just the NC_AUTH_VAL field without the full-dialog flicker of
+ * objc_draw(nc_dlg, NC_ROOT, ...): fills exactly that object's rectangle
+ * with white (VDI color 0 -- matches NC_ROOT's own obspec interiorcol,
+ * decoded from 0x00031070) before drawing the new text over it, since
+ * G_STRING draws never clear their own background (see the report). */
+static void nc_redraw_auth_val(short dlg_x, short dlg_y, short dlg_w, short dlg_h)
+{
+    short cw, ch, bw, bh;
+    short vdi;
+    short ox, oy;
+    short pxy[4];
+
+    vdi = graf_handle(&cw, &ch, &bw, &bh);
+    objc_offset(nc_dlg, NC_AUTH_VAL, &ox, &oy);
+
+    pxy[0] = ox;
+    pxy[1] = oy;
+    pxy[2] = (short)(ox + nc_dlg[NC_AUTH_VAL].ob_width  - 1);
+    pxy[3] = (short)(oy + nc_dlg[NC_AUTH_VAL].ob_height - 1);
+
+    /* Without an explicit MD_REPLACE, v_bar() inherits whatever VDI
+     * writing mode AES last left set (e.g. transparent/XOR for its own
+     * text or highlight drawing), which is what produced the reversed
+     * (black background, white text) fill instead of a solid white one. */
+    vswr_mode(vdi, MD_REPLACE);
+    vsf_interior(vdi, FIS_SOLID);
+    vsf_color(vdi, WHITE);
+    v_bar(vdi, pxy);
+
+    objc_draw(nc_dlg, NC_AUTH_VAL, MAX_DEPTH, dlg_x, dlg_y, dlg_w, dlg_h);
+
+    (void)cw; (void)ch; (void)bw; (void)bh;
+}
+
+/* Modal. OK commits the edit buffers into *nc (see nc_save_to_config());
+ * Cancel discards them, leaving *nc exactly as it was on entry. ESC is
+ * meant to behave like Cancel, per the same TOUCHEXIT/form_do() idiom
+ * used throughout this file -- see the report for a caveat on this. */
+static void netconfig_editor_run(NetConfig *nc)
+{
+    short x, y, w, h;
+    short which;
+    short start_obj;
+    int done;
+
+    nc_dialog_init();
+    nc_load_from_config(nc);
+
+    form_center(nc_dlg, &x, &y, &w, &h);
+    form_dial(FMD_START, x, y, w, h, x, y, w, h);
+    objc_draw(nc_dlg, NC_ROOT, MAX_DEPTH, x, y, w, h);
+
+    done = 0;
+    start_obj = NC_SSID_EDIT;
+    while (!done) {
+        which = (short)(form_do(nc_dlg, start_obj) & 0x7FFF);
+        wait_mouse_release();
+        start_obj = NC_SSID_EDIT;
+
+        switch (which) {
+        case NC_DHCP_BTN:
+            nc_dlg[NC_DHCP_BTN].ob_state   |= (unsigned short)SELECTED;
+            nc_dlg[NC_STATIC_BTN].ob_state &= (unsigned short)(~SELECTED);
+            nc_apply_ip_field_state(NETCONFIG_MODE_DHCP);
+            objc_draw(nc_dlg, NC_ROOT, MAX_DEPTH, x, y, w, h);
+            break;
+
+        case NC_STATIC_BTN:
+            nc_dlg[NC_STATIC_BTN].ob_state |= (unsigned short)SELECTED;
+            nc_dlg[NC_DHCP_BTN].ob_state   &= (unsigned short)(~SELECTED);
+            nc_apply_ip_field_state(NETCONFIG_MODE_STATIC);
+            objc_draw(nc_dlg, NC_ROOT, MAX_DEPTH, x, y, w, h);
+            break;
+
+        case NC_AUTH_BTN:
+            nc_auth_index = (nc_auth_index + 1) % NC_AUTH_OPTION_COUNT;
+            nc_auth_touched = 1;
+            /* Space-padded to the full field width -- see the matching
+             * comment in nc_load_from_config(). */
+            sprintf(buf_nc_auth_val, "%-11.11s", nc_auth_names[nc_auth_index]);
+            /* Targeted redraw (see nc_redraw_auth_val()) instead of the
+             * full NC_ROOT redraw: avoids flickering the whole dialog for
+             * a one-field text change. */
+            nc_redraw_auth_val(x, y, w, h);
+            break;
+
+        case NC_OK:
+            if (!nc_save_to_config(nc)) {
+                start_obj = NC_COUNTRY_EDIT; /* refocus on the field that failed */
+                break;
+            }
+            done = 1;
+            break;
+
+        case NC_CANCEL:
+        default:
+            done = 1;
+            break;
+        }
+    }
+
+    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+}
+
+/* ================================================================== */
 /* Drive overview / main dialog                                        */
 /* ================================================================== */
 
@@ -1238,10 +1954,10 @@ static void ov_dialog_init(void)
     DW    = 46 * cw;
     yt    = tm;
     ydiv1 = yt + rh + 1;
-    yrow0 = ydiv1 + 2;
+    yrow0 = ydiv1 + 5;
     ydiv2 = yrow0 + MAX_DRIVES * row_pitch + 2;
-    ybtn  = ydiv2 + 4;
-    DH    = ybtn + rh + tm;
+    ybtn  = ydiv2 + 7;
+    DH    = ybtn + rh + tm + 3;
 
     set_obj(ov_dlg, OV_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
     ov_dlg[OV_ROOT].ob_spec.index = 0x00031070L;
@@ -1268,8 +1984,8 @@ static void ov_dialog_init(void)
     set_obj(ov_dlg, OV_ADD, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 4*cw, ybtn, 10*cw, rh);
     ov_dlg[OV_ADD].ob_spec.free_string = "Add disk";
 
-    set_obj(ov_dlg, OV_SAVE, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, 18*cw, ybtn, 8*cw, rh);
-    ov_dlg[OV_SAVE].ob_spec.free_string = "  Save  ";
+    set_obj(ov_dlg, OV_OK, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, 18*cw, ybtn, 8*cw, rh);
+    ov_dlg[OV_OK].ob_spec.free_string = "   OK   ";
 
     set_obj(ov_dlg, OV_CANCEL, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 30*cw, ybtn, 8*cw, rh);
     ov_dlg[OV_CANCEL].ob_spec.free_string = " Cancel ";
@@ -1313,26 +2029,108 @@ static long atari_do_reset(void)
     return 0; /* unreached */
 }
 
-/* ================================================================== */
-/* Main entry point                                                    */
-/* ================================================================== */
+/* The only place that ever writes to firmware: the status window's own
+ * SAVE button (SW_SAVE). Covers both the drive list and, if the user
+ * actually changed it, the wifi/network config (separate SET/SAVE
+ * commands each, see save_to_firmware()/save_network_to_firmware()).
+ * Stops at the first failure; a failed network save leaves g_netconfig
+ * exactly as the user left it (never silently replaced), and drives
+ * already saved before it stay saved regardless. Returns 1 if the
+ * caller's window should close afterwards (drives and, if applicable,
+ * network both fully saved and read back -- a reboot is needed before
+ * either takes effect, so there is nothing left to do in this run), 0
+ * to keep it open. */
+static int perform_save(DriveConfig *cfg, int firmware_backed)
+{
+    int i;
+    int all_valid = 1;
+    char msg[220];
+    int network_changed;
 
-void dialog_run(DriveConfig *cfg)
+    if (drive_config_ordinary_count(cfg) > MAX_ORDINARY_DRIVES) {
+        sprintf(msg, "[3][Validation error|Too many drives (max %d).][OK]", MAX_ORDINARY_DRIVES);
+        form_alert(1, msg);
+        all_valid = 0;
+    }
+    if (all_valid) {
+        for (i = 0; i < cfg->drive_count; i++) {
+            if (!validate_drive(&cfg->drives[i], cfg, i, msg)) {
+                form_alert(1, msg);
+                all_valid = 0;
+                break;
+            }
+        }
+    }
+
+    /* Only validate/save network config if the user actually changed
+     * it since it was loaded (or last saved) -- opening/closing the
+     * Config dialog without real edits must never trigger a network
+     * save. */
+    network_changed = netconfig_changed(&g_netconfig, &g_netconfig_baseline);
+    if (all_valid && network_changed) {
+        if (!validate_netconfig(&g_netconfig, msg)) {
+            form_alert(1, msg);
+            all_valid = 0;
+        }
+    }
+
+    if (!all_valid)
+        return 0;
+
+    if (!firmware_backed) {
+        /* No firmware detected -- there is nowhere left to save to (no
+         * local file fallback anymore). */
+        form_alert(1, "[3][Save failed|No SideTNFS firmware detected.|Nothing was saved.][OK]");
+        return 0;
+    }
+
+    /* Drives first (existing, proven flow); network second, only if
+     * actually changed. Stop at the first failure either way. */
+    if (!save_to_firmware(cfg, msg)) {
+        form_alert(1, msg);
+        return 0;
+    }
+
+    if (network_changed) {
+        if (!save_network_to_firmware(&g_netconfig, msg)) {
+            form_alert(1, msg);
+            return 0; /* drives already saved; g_netconfig left untouched */
+        }
+        g_netconfig_baseline = g_netconfig; /* new known-good baseline */
+
+        /* No Reset Now button here: an Atari reset does not reset the
+         * Pico, so it would not actually make the new wifi settings
+         * active -- offering it would contradict the message below.
+         * Activating them needs a genuine Sidecartridge restart, which
+         * this program has no way to trigger. */
+        form_alert(1, "[1][Network settings saved.|They become active after|"
+                      "restarting the Sidecartridge.][OK]");
+    } else {
+        /* Cancel is the default (button 1): a full-machine reset is
+         * easy to trigger by accident otherwise. */
+        if (form_alert(1, "[1][Configuration saved to SideTNFS.|Reboot required.|"
+                          "Multi-drive mounting is not active yet.][Cancel|Reset Now]") == 2) {
+            Supexec(atari_do_reset);
+        }
+    }
+    return 1;
+}
+
+/* ================================================================== */
+/* Drives window (Fase AC-6)                                           */
+/* Add disk/edit/delete only -- no Config (that lives on the status     */
+/* window now) and no firmware write here: OK and Cancel both just      */
+/* close this window, keeping (OK) or leaving as-is (Cancel, which      */
+/* never rolled back edits to begin with) whatever *cfg holds in        */
+/* memory. The only place that ever writes to firmware is the status    */
+/* window's own Save button (perform_save(), via SW_SAVE). */
+/* ================================================================== */
+static void drives_window_run(DriveConfig *cfg)
 {
     short x, y, w, h;
     short which;
     int done;
     int i;
-    int firmware_backed;
-
-    shared_fields_init();
-
-    /* No local file storage: *cfg starts out as the built-in defaults
-     * (drive_config_init_defaults(), set by main.c) and is fully
-     * replaced by the firmware's own drive list when one is found. See
-     * dialog_startup_load(). Without firmware, Save has nothing to
-     * write to and says so. */
-    firmware_backed = dialog_startup_load(cfg);
 
     ov_dialog_init();
     ov_refresh_rows(cfg);
@@ -1393,48 +2191,313 @@ void dialog_run(DriveConfig *cfg)
                 objc_draw(ov_dlg, OV_ROOT, MAX_DEPTH, x, y, w, h);
             }
 
-        } else if (which == OV_SAVE) {
-            int all_valid = 1;
-            char msg[220];
-
-            if (drive_config_ordinary_count(cfg) > MAX_ORDINARY_DRIVES) {
-                sprintf(msg, "[3][Validation error|Too many drives (max %d).][OK]", MAX_ORDINARY_DRIVES);
-                form_alert(1, msg);
-                all_valid = 0;
-            }
-            if (all_valid) {
-                for (i = 0; i < cfg->drive_count; i++) {
-                    if (!validate_drive(&cfg->drives[i], cfg, i, msg)) {
-                        form_alert(1, msg);
-                        all_valid = 0;
-                        break;
-                    }
-                }
-            }
-
-            if (all_valid && firmware_backed) {
-                /* The full write sequence + readback verification lives
-                 * in save_to_firmware(); this is now the only place
-                 * config is ever persisted -- no local file involved. */
-                if (save_to_firmware(cfg, msg)) {
-                    /* Cancel is the default (button 1): a full-machine
-                     * reset is easy to trigger by accident otherwise. */
-                    if (form_alert(1, "[1][Configuration saved to SideTNFS.|Reboot required.|"
-                                      "Multi-drive mounting is not active yet.][Cancel|Reset Now]") == 2) {
-                        Supexec(atari_do_reset);
-                    }
-                    done = 1;
-                } else {
-                    form_alert(1, msg);
-                }
-            } else if (all_valid) {
-                /* No firmware detected -- there is nowhere left to save
-                 * to (no local file fallback anymore). */
-                form_alert(1, "[3][Save failed|No SideTNFS firmware detected.|Nothing was saved.][OK]");
-            }
+        } else if (which == OV_OK) {
+            done = 1;
 
         } else if (which == OV_CANCEL) {
             done = 1;
+        }
+    }
+
+    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+}
+
+/* ================================================================== */
+/* Status window (Fase AC-6) -- the new top-level main window           */
+/* ================================================================== */
+
+static void sw_dialog_init(void)
+{
+    short cw, ch, bw, bh;
+    short sx, sy, ssw, sh;
+    int rh, tm, pitch;
+    int DW, DH, xl;
+    int yt, ydiv1, ylblnet, ynet0, ynet1, ynet2, ynet3, ydiv2,
+        ylblclock, yclock0, yclock1, ydiv3, ylbldrv, ydrv0, ydiv4, ybtn;
+    int i;
+
+    graf_handle(&cw, &ch, &bw, &bh);
+    wind_get(0, WF_WORKXYWH, &sx, &sy, &ssw, &sh);
+    if (sh <= 0 || sh > 800) sh = 200;
+
+    rh    = (sh >= 350) ? (int)ch : ((ch > 8) ? ch / 2 : (int)ch);
+    tm    = (rh / 4 > 2) ? rh / 4 : 2;
+    pitch = rh + 2; /* tighter than the editors' rh+3: read-only status text */
+
+    DW = 44 * cw;
+    xl = 2 * cw;
+
+    yt        = tm;
+    ydiv1     = yt + rh + 1;
+    ylblnet   = ydiv1 + 5;
+    ynet0     = ylblnet + pitch;
+    ynet1     = ynet0 + pitch;
+    ynet2     = ynet1 + pitch;
+    ynet3     = ynet2 + pitch;
+    ydiv2     = ynet3 + rh + 2;
+    ylblclock = ydiv2 + 2;
+    yclock0   = ylblclock + pitch;
+    yclock1   = yclock0 + pitch;
+    ydiv3     = yclock1 + rh + 2;
+    ylbldrv   = ydiv3 + 2;
+    ydrv0     = ylbldrv + pitch;
+    ydiv4     = ydrv0 + SW_NUM_DRIVE_LINES * pitch + 2;
+    ybtn      = ydiv4 + 7;
+    DH        = ybtn + rh + tm + 3;
+
+    set_obj(sw_dlg, SW_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
+    sw_dlg[SW_ROOT].ob_spec.index = 0x00031070L;
+
+    set_obj(sw_dlg, SW_TITLE, G_STRING, NONE, NORMAL, 10*cw, yt, 24*cw, rh);
+    sw_dlg[SW_TITLE].ob_spec.free_string = "SIDETNFS Configuration";
+
+    set_obj(sw_dlg, SW_DIV1, G_BOX, NONE, NORMAL, cw, ydiv1, DW - 2*cw, 2);
+    sw_dlg[SW_DIV1].ob_spec.index = 0x00001171L;
+
+    set_obj(sw_dlg, SW_LBL_NETWORK, G_STRING, NONE, NORMAL, xl, ylblnet, 12*cw, rh);
+    sw_dlg[SW_LBL_NETWORK].ob_spec.free_string = "Network";
+
+    set_obj(sw_dlg, SW_NET_LINE_0, G_STRING, NONE, NORMAL, xl, ynet0, 40*cw, rh);
+    sw_dlg[SW_NET_LINE_0].ob_spec.free_string = sw_net_line[0];
+    set_obj(sw_dlg, SW_NET_LINE_1, G_STRING, NONE, NORMAL, xl, ynet1, 40*cw, rh);
+    sw_dlg[SW_NET_LINE_1].ob_spec.free_string = sw_net_line[1];
+    set_obj(sw_dlg, SW_NET_LINE_2, G_STRING, NONE, NORMAL, xl, ynet2, 40*cw, rh);
+    sw_dlg[SW_NET_LINE_2].ob_spec.free_string = sw_net_line[2];
+    set_obj(sw_dlg, SW_NET_LINE_3, G_STRING, NONE, NORMAL, xl, ynet3, 40*cw, rh);
+    sw_dlg[SW_NET_LINE_3].ob_spec.free_string = sw_net_line[3];
+
+    set_obj(sw_dlg, SW_DIV2, G_BOX, NONE, NORMAL, cw, ydiv2, DW - 2*cw, 2);
+    sw_dlg[SW_DIV2].ob_spec.index = 0x00001171L;
+
+    set_obj(sw_dlg, SW_LBL_CLOCK, G_STRING, NONE, NORMAL, xl, ylblclock, 12*cw, rh);
+    sw_dlg[SW_LBL_CLOCK].ob_spec.free_string = "Clock";
+
+    set_obj(sw_dlg, SW_CLOCK_LINE_0, G_STRING, NONE, NORMAL, xl, yclock0, 40*cw, rh);
+    sw_dlg[SW_CLOCK_LINE_0].ob_spec.free_string = sw_clock_line[0];
+    set_obj(sw_dlg, SW_CLOCK_LINE_1, G_STRING, NONE, NORMAL, xl, yclock1, 40*cw, rh);
+    sw_dlg[SW_CLOCK_LINE_1].ob_spec.free_string = sw_clock_line[1];
+
+    set_obj(sw_dlg, SW_DIV3, G_BOX, NONE, NORMAL, cw, ydiv3, DW - 2*cw, 2);
+    sw_dlg[SW_DIV3].ob_spec.index = 0x00001171L;
+
+    set_obj(sw_dlg, SW_LBL_DRIVES, G_STRING, NONE, NORMAL, xl, ylbldrv, 16*cw, rh);
+    sw_dlg[SW_LBL_DRIVES].ob_spec.free_string = "Active drives";
+
+    for (i = 0; i < SW_NUM_DRIVE_LINES; i++) {
+        int ry = ydrv0 + i * pitch;
+        set_obj(sw_dlg, SW_DRIVE_LINE(i), G_STRING, NONE, NORMAL, xl, ry, 40*cw, rh);
+        sw_dlg[SW_DRIVE_LINE(i)].ob_spec.free_string = sw_drive_line[i];
+    }
+
+    set_obj(sw_dlg, SW_DIV4, G_BOX, NONE, NORMAL, cw, ydiv4, DW - 2*cw, 2);
+    sw_dlg[SW_DIV4].ob_spec.index = 0x00001171L;
+
+    set_obj(sw_dlg, SW_CONFIG, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 2*cw, ybtn, 9*cw, rh);
+    sw_dlg[SW_CONFIG].ob_spec.free_string = " CONFIG  ";
+
+    set_obj(sw_dlg, SW_DRIVES, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 12*cw, ybtn, 9*cw, rh);
+    sw_dlg[SW_DRIVES].ob_spec.free_string = " DRIVES  ";
+
+    set_obj(sw_dlg, SW_SAVE, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, 22*cw, ybtn, 9*cw, rh);
+    sw_dlg[SW_SAVE].ob_spec.free_string = "  SAVE   ";
+
+    set_obj(sw_dlg, SW_QUIT, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 32*cw, ybtn, 9*cw, rh);
+    sw_dlg[SW_QUIT].ob_spec.free_string = "  QUIT   ";
+
+    wire_tree(sw_dlg, SW_NOBJS);
+
+    (void)sx; (void)sy; (void)ssw; (void)bw; (void)bh;
+}
+
+/* Reads only g_netconfig (the one-time network_startup_load() result,
+ * kept current afterwards by the CONFIG editor) and *cfg (the local
+ * DriveConfig, for the TNFS server line) -- never calls
+ * sidetnfs_probe_get_network_config() itself. GET_NETWORK_CONFIG/0x0413
+ * is sent exactly once per session, in network_startup_load(). */
+static void status_refresh_network(const DriveConfig *cfg)
+{
+    int i;
+    int tnfs_count = 0;
+    const Drive *first_tnfs = 0;
+
+    /* "Configured" only means the saved configuration was read
+     * successfully -- 0x0413 returns stored config, not a live Wi-Fi
+     * association proof, so this is deliberately never "Connected". */
+    switch (g_netconfig_load_state) {
+    case NETLOAD_OK:
+        strncpy(sw_net_line[0], "Status: Configured", SW_LINE_BUF - 1);
+        break;
+    case NETLOAD_BAD_STATUS:
+        sprintf(sw_net_line[0], "Status: %s", netconfig_status_text(g_netconfig_load_fw_status));
+        break;
+    case NETLOAD_UNAVAILABLE:
+    default:
+        strncpy(sw_net_line[0], "Status: Unavailable", SW_LINE_BUF - 1);
+        break;
+    }
+    sw_net_line[0][SW_LINE_BUF - 1] = '\0';
+
+    /* SSID only -- the password is never shown here. */
+    if (g_netconfig.ssid[0] != '\0')
+        sprintf(sw_net_line[1], "SSID: %s", g_netconfig.ssid);
+    else
+        strncpy(sw_net_line[1], "SSID: -", SW_LINE_BUF - 1);
+    sw_net_line[1][SW_LINE_BUF - 1] = '\0';
+
+    /* DHCP mode shows "DHCP", not the stored static-IP field -- the
+     * actual DHCP-assigned address is unknown to this protocol. */
+    if (g_netconfig.ip_mode == NETCONFIG_MODE_DHCP)
+        strncpy(sw_net_line[2], "IP address: DHCP", SW_LINE_BUF - 1);
+    else if (g_netconfig.ip_address[0] != '\0')
+        sprintf(sw_net_line[2], "IP address: %s", g_netconfig.ip_address);
+    else
+        strncpy(sw_net_line[2], "IP address: -", SW_LINE_BUF - 1);
+    sw_net_line[2][SW_LINE_BUF - 1] = '\0';
+
+    /* TNFS server comes from the local DriveConfig, not g_netconfig --
+     * no firmware command sent for this line either. */
+    for (i = 0; i < cfg->drive_count; i++) {
+        if (cfg->drives[i].type == DRIVE_TYPE_TNFS) {
+            if (tnfs_count == 0)
+                first_tnfs = &cfg->drives[i];
+            tnfs_count++;
+        }
+    }
+    if (tnfs_count == 0)
+        strncpy(sw_net_line[3], "TNFS server: -", SW_LINE_BUF - 1);
+    else if (tnfs_count == 1)
+        sprintf(sw_net_line[3], "TNFS server: %.28s:%d", first_tnfs->host, first_tnfs->port);
+    else
+        sprintf(sw_net_line[3], "TNFS server: %.20s +%d", first_tnfs->host, tnfs_count - 1);
+    sw_net_line[3][SW_LINE_BUF - 1] = '\0';
+}
+
+/* Fase AC-6: placeholder -- RTC settings/status follow in a separate
+ * phase, per "Not doen". */
+static void status_refresh_clock(void)
+{
+    strncpy(sw_clock_line[0], "NTP: Not synchronized", SW_LINE_BUF - 1); sw_clock_line[0][SW_LINE_BUF - 1] = '\0';
+    strncpy(sw_clock_line[1], "Timezone: -",           SW_LINE_BUF - 1); sw_clock_line[1][SW_LINE_BUF - 1] = '\0';
+}
+
+/* Real data from the existing DriveConfig model. Caps the visible list
+ * at SW_NUM_DRIVE_LINES (this is a compact summary, not the full editor
+ * -- DRIVES still shows every configured drive) and shows an overflow
+ * note on the last line rather than silently dropping entries. */
+static void status_refresh_drives(const DriveConfig *cfg)
+{
+    int i;
+    int shown;
+    int overflow;
+
+    if (cfg->drive_count == 0) {
+        strncpy(sw_drive_line[0], "No active drives", SW_LINE_BUF - 1);
+        sw_drive_line[0][SW_LINE_BUF - 1] = '\0';
+        for (i = 1; i < SW_NUM_DRIVE_LINES; i++)
+            sw_drive_line[i][0] = '\0';
+        return;
+    }
+
+    overflow = cfg->drive_count > SW_NUM_DRIVE_LINES;
+    shown = overflow ? (SW_NUM_DRIVE_LINES - 1) : cfg->drive_count;
+
+    for (i = 0; i < shown; i++) {
+        const Drive *d = &cfg->drives[i];
+        const char *path;
+
+        switch (d->type) {
+        case DRIVE_TYPE_TNFS: path = (d->mount_path[0] != '\0') ? d->mount_path : "/"; break;
+        case DRIVE_TYPE_SD:   path = d->sd_path; break;
+        case DRIVE_TYPE_CONFIG:
+        default:              path = "-"; break;
+        }
+        sprintf(sw_drive_line[i], "%c:  %-10.10s %-6s %-18.18s",
+                d->letter, d->nickname, drive_type_name(d->type), path);
+    }
+
+    if (overflow) {
+        sprintf(sw_drive_line[shown], "...and %d more (see Drives)", cfg->drive_count - shown);
+        shown++;
+    }
+
+    for (i = shown; i < SW_NUM_DRIVE_LINES; i++)
+        sw_drive_line[i][0] = '\0';
+}
+
+/* Updates all three status sections' text buffers. Does not redraw --
+ * matches ov_refresh_rows()'s existing convention of leaving objc_draw()
+ * to the caller, since callers often need to draw other objects too. */
+static void status_window_refresh(const DriveConfig *cfg)
+{
+    status_refresh_network(cfg);
+    status_refresh_clock();
+    status_refresh_drives(cfg);
+}
+
+/* ================================================================== */
+/* Main entry point                                                    */
+/* ================================================================== */
+
+void dialog_run(DriveConfig *cfg)
+{
+    short x, y, w, h;
+    short which;
+    int done;
+    int firmware_backed;
+
+    shared_fields_init();
+
+    /* No local file storage: *cfg starts out as the built-in defaults
+     * (drive_config_init_defaults(), set by main.c) and is fully
+     * replaced by the firmware's own drive list when one is found. See
+     * dialog_startup_load(). Without firmware, Save has nothing to
+     * write to and says so. */
+    firmware_backed = dialog_startup_load(cfg);
+
+    /* Fase AC-4 (network protocol): loaded after the drive protocol,
+     * regardless of firmware_backed -- with no firmware at all this
+     * simply times out too and falls back the same way. */
+    network_startup_load();
+
+    sw_dialog_init();
+    status_window_refresh(cfg);
+
+    form_center(sw_dlg, &x, &y, &w, &h);
+    form_dial(FMD_START, x, y, w, h, x, y, w, h);
+    objc_draw(sw_dlg, SW_ROOT, MAX_DEPTH, x, y, w, h);
+
+    done = 0;
+    while (!done) {
+        which = (short)(form_do(sw_dlg, SW_ROOT) & 0x7FFF);
+        wait_mouse_release();
+
+        switch (which) {
+        case SW_CONFIG:
+            netconfig_editor_run(&g_netconfig);
+            /* Reflect the user's OK'd edits (or, on Cancel, the unchanged
+             * g_netconfig -- netconfig_editor_run() already guarantees
+             * that) immediately. No new probe: g_netconfig is already
+             * current, this only rebuilds the status window's own text. */
+            status_refresh_network(cfg);
+            objc_draw(sw_dlg, SW_ROOT, MAX_DEPTH, x, y, w, h);
+            break;
+
+        case SW_DRIVES:
+            drives_window_run(cfg);
+            status_window_refresh(cfg);
+            objc_draw(sw_dlg, SW_ROOT, MAX_DEPTH, x, y, w, h);
+            break;
+
+        case SW_SAVE:
+            if (perform_save(cfg, firmware_backed))
+                done = 1;
+            objc_draw(sw_dlg, SW_ROOT, MAX_DEPTH, x, y, w, h);
+            break;
+
+        case SW_QUIT:
+        default:
+            done = 1;
+            break;
         }
     }
 

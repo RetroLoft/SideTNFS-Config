@@ -65,6 +65,44 @@ typedef struct {
     char sd_path[SIDETNFS_SDPATH_LEN];
 } SideTnfsDriveInfo;
 
+/* Fase AC-4 (wifi/network): field lengths match the firmware's
+ * sidetnfs_network_config_t exactly (romemul/include/sidetnfs_netconfig.h
+ * via network.h), independent of the UI's netconfig.h lengths. */
+#define SIDETNFS_NET_SSID_LEN     36
+#define SIDETNFS_NET_PASSWORD_LEN 68
+#define SIDETNFS_NET_COUNTRY_LEN  4
+#define SIDETNFS_NET_IPV4_LEN     16
+
+/* romemul/include/sidetnfs_netconfig.h sidetnfs_netconfig_status_t */
+#define SIDETNFS_NETCONFIG_STATUS_OK                  0
+#define SIDETNFS_NETCONFIG_STATUS_INVALID_SSID        1
+#define SIDETNFS_NETCONFIG_STATUS_INVALID_PASSWORD    2
+#define SIDETNFS_NETCONFIG_STATUS_INVALID_AUTH_MODE   3
+#define SIDETNFS_NETCONFIG_STATUS_INVALID_COUNTRY     4
+#define SIDETNFS_NETCONFIG_STATUS_INVALID_DHCP        5
+#define SIDETNFS_NETCONFIG_STATUS_INVALID_IP          6
+#define SIDETNFS_NETCONFIG_STATUS_INVALID_NETMASK     7
+#define SIDETNFS_NETCONFIG_STATUS_INVALID_GATEWAY     8
+#define SIDETNFS_NETCONFIG_STATUS_INVALID_DNS         9
+#define SIDETNFS_NETCONFIG_STATUS_NOT_STAGED          10
+#define SIDETNFS_NETCONFIG_STATUS_FLASH_WRITE_FAILED  11
+#define SIDETNFS_NETCONFIG_STATUS_FLASH_VERIFY_FAILED 12
+
+/* Wire record shared by GET_NETWORK_CONFIG (full) and SET_NETWORK_CONFIG
+ * (request, minus status). */
+typedef struct {
+    unsigned long status;    /* only meaningful after GET/SET return OK */
+    unsigned long auth_mode; /* 0-8, raw firmware value */
+    unsigned long use_dhcp;
+    char ssid[SIDETNFS_NET_SSID_LEN];
+    char password[SIDETNFS_NET_PASSWORD_LEN];
+    char country[SIDETNFS_NET_COUNTRY_LEN];
+    char ip_address[SIDETNFS_NET_IPV4_LEN];
+    char netmask[SIDETNFS_NET_IPV4_LEN];
+    char gateway[SIDETNFS_NET_IPV4_LEN];
+    char primary_dns[SIDETNFS_NET_IPV4_LEN];
+} SideTnfsNetworkConfig;
+
 /* Every function below returns SIDETNFS_PROBE_OK / SIDETNFS_PROBE_TIMEOUT
  * for the communication result. The firmware's own protocol status (OK /
  * INVALID_INDEX / ... ) is a separate result, returned via *info->status
@@ -78,5 +116,9 @@ int sidetnfs_probe_set_drive(unsigned long index, const SideTnfsDriveInfo *in, u
 int sidetnfs_probe_delete_drive(unsigned long index, unsigned long *out_status);
 int sidetnfs_probe_set_config_drive(unsigned long letter, unsigned long *out_status);
 int sidetnfs_probe_save_config(unsigned long *out_status);
+
+int sidetnfs_probe_get_network_config(SideTnfsNetworkConfig *info);
+int sidetnfs_probe_set_network_config(const SideTnfsNetworkConfig *in, unsigned long *out_status);
+int sidetnfs_probe_save_network_config(unsigned long *out_status);
 
 #endif
