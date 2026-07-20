@@ -103,6 +103,31 @@ typedef struct {
     char primary_dns[SIDETNFS_NET_IPV4_LEN];
 } SideTnfsNetworkConfig;
 
+/* Fase 12A (Clock/NTP): field lengths match the firmware's
+ * sidetnfs_rtc_config_t exactly (romemul/include/sidetnfs_rtcconfig.h),
+ * cross-checked against romemul/include/gemdrvemul.h's
+ * GEMDRVEMUL_SIDETNFS_RTC_* offsets. */
+#define SIDETNFS_RTC_NTP_SERVER_LEN 64
+#define SIDETNFS_RTC_UTC_OFFSET_LEN 4
+
+/* romemul/include/sidetnfs_rtcconfig.h sidetnfs_rtcconfig_status_t */
+#define SIDETNFS_RTCCONFIG_STATUS_OK                  0
+#define SIDETNFS_RTCCONFIG_STATUS_INVALID_ENABLED     1
+#define SIDETNFS_RTCCONFIG_STATUS_INVALID_NTP_SERVER  2
+#define SIDETNFS_RTCCONFIG_STATUS_INVALID_UTC_OFFSET  3
+#define SIDETNFS_RTCCONFIG_STATUS_NOT_STAGED          4
+#define SIDETNFS_RTCCONFIG_STATUS_FLASH_WRITE_FAILED  5
+#define SIDETNFS_RTCCONFIG_STATUS_FLASH_VERIFY_FAILED 6
+
+/* Wire record shared by GET_RTC_CONFIG (full) and SET_RTC_CONFIG
+ * (request, minus status). */
+typedef struct {
+    unsigned long status;  /* only meaningful after GET/SET return OK */
+    unsigned long enabled; /* 0 or 1 */
+    char ntp_server[SIDETNFS_RTC_NTP_SERVER_LEN];
+    char utc_offset[SIDETNFS_RTC_UTC_OFFSET_LEN];
+} SideTnfsRtcConfig;
+
 /* Every function below returns SIDETNFS_PROBE_OK / SIDETNFS_PROBE_TIMEOUT
  * for the communication result. The firmware's own protocol status (OK /
  * INVALID_INDEX / ... ) is a separate result, returned via *info->status
@@ -120,5 +145,9 @@ int sidetnfs_probe_save_config(unsigned long *out_status);
 int sidetnfs_probe_get_network_config(SideTnfsNetworkConfig *info);
 int sidetnfs_probe_set_network_config(const SideTnfsNetworkConfig *in, unsigned long *out_status);
 int sidetnfs_probe_save_network_config(unsigned long *out_status);
+
+int sidetnfs_probe_get_rtc_config(SideTnfsRtcConfig *info);
+int sidetnfs_probe_set_rtc_config(const SideTnfsRtcConfig *in, unsigned long *out_status);
+int sidetnfs_probe_save_rtc_config(unsigned long *out_status);
 
 #endif

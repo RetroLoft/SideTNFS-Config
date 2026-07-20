@@ -3,7 +3,9 @@
  * (0x040D), GET_DRIVE (0x040E), SET_DRIVE (0x040F), DELETE_DRIVE
  * (0x0410), SET_CONFIG_DRIVE (0x0411), SAVE_CONFIG (0x0412), plus
  * (Fase 11A/AC-4-2) GET_NETWORK_CONFIG (0x0413), SET_NETWORK_CONFIG
- * (0x0414), SAVE_NETWORK_CONFIG (0x0415).
+ * (0x0414), SAVE_NETWORK_CONFIG (0x0415), plus (Fase 12A)
+ * GET_RTC_CONFIG (0x0416), SET_RTC_CONFIG (0x0417), SAVE_RTC_CONFIG
+ * (0x0418).
  *
  * Protocol cross-checked against (read-only references, not modified):
  *   sd2tnfs/docs/sidetnfs-config-protocol.md      (contract, protocol v2)
@@ -11,23 +13,30 @@
  *     GEMDRVEMUL_SIDETNFS_CONFIG, not guessed -- re-verified for the
  *     network block: GEMDRVEMUL_SIDETNFS_NETWORK = DRIVE_SD_PATH +
  *     SIDETNFS_SDPATH_LEN = 0x4472, matching this phase's brief exactly,
- *     field by field, through 0x4526)
+ *     field by field, through 0x4526; and for the RTC block:
+ *     GEMDRVEMUL_SIDETNFS_RTC = ALIGN4(NETWORK_DNS + IPV4_LEN) = 0x4528,
+ *     through 0x4572, matching the Fase 12A brief exactly)
  *   sd2tnfs/romemul/include/commands.h            (command codes,
- *     0x0413/0x0414/0x0415 confirmed)
+ *     0x0413/0x0414/0x0415/0x0416/0x0417/0x0418 confirmed --
+ *     GEMDRVEMUL_SIDETNFS_GET/SET/SAVE_RTC_CONFIG = APP_GEMDRVEMUL<<8 |
+ *     0x16/0x17/0x18, APP_GEMDRVEMUL=0x04)
  *   sd2tnfs/romemul/include/sidetnfs_config.h     (drive status/type/
  *     transport enum values)
  *   sd2tnfs/romemul/include/sidetnfs_netconfig.h  (network status enum,
  *     sidetnfs_network_config_t field order/sizes, 176-byte static_assert)
+ *   sd2tnfs/romemul/include/sidetnfs_rtcconfig.h  (RTC status enum,
+ *     sidetnfs_rtc_config_t field order/sizes, 70-byte static_assert)
  *   sd2tnfs/romemul/include/network.h             (MAX_SSID_LENGTH=36,
  *     MAX_PASSWORD_LENGTH=68, IPV4_ADDRESS_LENGTH=16)
  *   sd2tnfs/romemul/include/memfunc.h             (WRITE_WORD,
  *     WRITE_AND_SWAP_LONGWORD, CHANGE_ENDIANESS_BLOCK16,
  *     COPY_AND_CHANGE_ENDIANESS_BLOCK16, GET_PAYLOAD_PARAM16/32)
- *   sd2tnfs/romemul/gemdrvemul.c                  (all nine handlers --
- *     exact payloadPtr consumption order for SET_DRIVE/SET_NETWORK_CONFIG,
- *     and confirmation that GET/SET_NETWORK_CONFIG use the exact same
+ *   sd2tnfs/romemul/gemdrvemul.c                  (all handlers -- exact
+ *     payloadPtr consumption order for SET_DRIVE/SET_NETWORK_CONFIG/
+ *     SET_RTC_CONFIG (enabled, then ntp_server, then utc_offset), and
+ *     confirmation that GET/SET_RTC_CONFIG use the exact same
  *     WRITE_AND_SWAP_LONGWORD/WRITE_WORD/CHANGE_ENDIANESS_BLOCK16 pattern
- *     as the drive commands, not a new one)
+ *     as the drive/network commands, not a new one)
  *   sidecart-gemdrive-atari/src/inc/sidecart_functions.s
  *     (send_sync_command_to_sidecart / send_sync_write_command_to_sidecart
  *     -- the proven 68k-side random-token handshake AND the proven
@@ -74,6 +83,9 @@
 #define CMD_GET_NETWORK_CONFIG  0x0413UL
 #define CMD_SET_NETWORK_CONFIG  0x0414UL
 #define CMD_SAVE_NETWORK_CONFIG 0x0415UL
+#define CMD_GET_RTC_CONFIG      0x0416UL
+#define CMD_SET_RTC_CONFIG      0x0417UL
+#define CMD_SAVE_RTC_CONFIG     0x0418UL
 
 #define RANDOM_TOKEN_OFFSET      0x0000UL /* echoed token, polled after completion */
 #define RANDOM_TOKEN_SEED_OFFSET 0x0004UL /* Pico-published seed, read before sending */
@@ -153,6 +165,34 @@ _Static_assert(NET_BLOCK_END <= 0x10000UL, "network block must fit the 64KB ROM3
 #define SET_NETWORK_CONFIG_PAYLOAD_BYTES \
     (2UL*2UL + (unsigned long)SIDETNFS_NET_SSID_LEN + (unsigned long)SIDETNFS_NET_PASSWORD_LEN + \
      (unsigned long)SIDETNFS_NET_COUNTRY_LEN + 4UL*(unsigned long)SIDETNFS_NET_IPV4_LEN)
+
+/* Fase 12A: the RTC/NTP block immediately follows the network block,
+ * same ALIGN4(previous block's own end) structural derivation as the
+ * network block used relative to the drive block -- cross-checked
+ * against romemul/include/gemdrvemul.h's GEMDRVEMUL_SIDETNFS_RTC_*
+ * macros, which compute it exactly the same way (NET_BLOCK_END is
+ * already a multiple of 4 here, so ALIGN4 is a no-op in practice, but
+ * applying it anyway keeps this resilient to a future network field
+ * change the same way the network block itself is resilient to drive
+ * block changes). */
+#define RTC_BASE_UNALIGNED    NET_BLOCK_END
+#define RTC_STATUS_OFFSET     SIDETNFS_NETWORK_ALIGN4(RTC_BASE_UNALIGNED)              /* uint32_t, swapped long */
+#define RTC_ENABLED_OFFSET    (RTC_STATUS_OFFSET     + 4UL)                             /* uint16_t, plain word */
+#define RTC_NTP_SERVER_OFFSET (RTC_ENABLED_OFFSET    + 2UL)                             /* char[64] */
+#define RTC_UTC_OFFSET_OFFSET (RTC_NTP_SERVER_OFFSET + (unsigned long)SIDETNFS_RTC_NTP_SERVER_LEN) /* char[4] */
+#define RTC_BLOCK_END          (RTC_UTC_OFFSET_OFFSET + (unsigned long)SIDETNFS_RTC_UTC_OFFSET_LEN)
+
+_Static_assert((RTC_STATUS_OFFSET & 3UL) == 0UL, "RTC_STATUS_OFFSET must be 4-byte aligned");
+_Static_assert((RTC_ENABLED_OFFSET & 1UL) == 0UL, "RTC_ENABLED_OFFSET must be 2-byte aligned");
+_Static_assert((RTC_NTP_SERVER_OFFSET & 1UL) == 0UL, "RTC_NTP_SERVER_OFFSET must be 2-byte aligned");
+_Static_assert((RTC_UTC_OFFSET_OFFSET & 1UL) == 0UL, "RTC_UTC_OFFSET_OFFSET must be 2-byte aligned");
+_Static_assert(RTC_BLOCK_END <= 0x10000UL, "RTC block must fit the 64KB ROM3 window");
+
+/* SET_RTC_CONFIG request payload size, excluding the 4-byte token:
+ * enabled(2) + ntp_server(64) + utc_offset(4) = 70 bytes, matching the
+ * brief exactly (no index field, same shape as SET_NETWORK_CONFIG). */
+#define SET_RTC_CONFIG_PAYLOAD_BYTES \
+    (2UL + (unsigned long)SIDETNFS_RTC_NTP_SERVER_LEN + (unsigned long)SIDETNFS_RTC_UTC_OFFSET_LEN)
 
 #define PROBE_TIMEOUT_SEC      2
 #define SAVE_CONFIG_TIMEOUT_SEC 5 /* SAVE_CONFIG does real flash erase+program */
@@ -400,5 +440,49 @@ int sidetnfs_probe_save_network_config(unsigned long *out_status)
         return SIDETNFS_PROBE_TIMEOUT;
 
     *out_status = rom3_read_long(NET_STATUS_OFFSET);
+    return SIDETNFS_PROBE_OK;
+}
+
+int sidetnfs_probe_get_rtc_config(SideTnfsRtcConfig *info)
+{
+    unsigned long seed = send_command_start(CMD_GET_RTC_CONFIG, 0UL);
+
+    if (!wait_for_token(seed, PROBE_TIMEOUT_SEC))
+        return SIDETNFS_PROBE_TIMEOUT;
+
+    info->status  = rom3_read_long(RTC_STATUS_OFFSET);
+    info->enabled = rom3_read_word(RTC_ENABLED_OFFSET);
+
+    read_string_field(RTC_NTP_SERVER_OFFSET, info->ntp_server, SIDETNFS_RTC_NTP_SERVER_LEN);
+    read_string_field(RTC_UTC_OFFSET_OFFSET, info->utc_offset, SIDETNFS_RTC_UTC_OFFSET_LEN);
+    return SIDETNFS_PROBE_OK;
+}
+
+int sidetnfs_probe_set_rtc_config(const SideTnfsRtcConfig *in, unsigned long *out_status)
+{
+    unsigned long seed = send_command_start(CMD_SET_RTC_CONFIG, SET_RTC_CONFIG_PAYLOAD_BYTES);
+
+    /* No index field here, matching GEMDRVEMUL_SIDETNFS_SET_RTC_CONFIG's
+     * payloadPtr consumption order exactly: enabled, then ntp_server,
+     * then utc_offset. */
+    send_param16(in->enabled);
+    send_string_field(in->ntp_server, SIDETNFS_RTC_NTP_SERVER_LEN);
+    send_string_field(in->utc_offset, SIDETNFS_RTC_UTC_OFFSET_LEN);
+
+    if (!wait_for_token(seed, PROBE_TIMEOUT_SEC))
+        return SIDETNFS_PROBE_TIMEOUT;
+
+    *out_status = rom3_read_long(RTC_STATUS_OFFSET);
+    return SIDETNFS_PROBE_OK;
+}
+
+int sidetnfs_probe_save_rtc_config(unsigned long *out_status)
+{
+    unsigned long seed = send_command_start(CMD_SAVE_RTC_CONFIG, 0UL);
+
+    if (!wait_for_token(seed, SAVE_CONFIG_TIMEOUT_SEC))
+        return SIDETNFS_PROBE_TIMEOUT;
+
+    *out_status = rom3_read_long(RTC_STATUS_OFFSET);
     return SIDETNFS_PROBE_OK;
 }

@@ -27,6 +27,7 @@
 #include "dialog.h"
 #include "drive.h"
 #include "netconfig.h"
+#include "rtcconfig.h"
 #include "sidetnfs_probe.h"
 
 /* ================================================================== */
@@ -89,6 +90,26 @@ enum {
 };
 
 /* ================================================================== */
+/* Clock/NTP editor (RC_*)                                             */
+/* Fase 12, v1 -- KISS: opened via the CLOCK button at the bottom of the */
+/* WiFi/Network settings editor (NC_*), not from the main status window */
+/* directly (that dialog is already full -- see the report). UI only,  */
+/* same "temporary working buffers, committed only on OK" idiom as      */
+/* every other editor in this file; no firmware read/write yet.         */
+/* ================================================================== */
+enum {
+    RC_ROOT = 0,
+    RC_TITLE,
+    RC_DIV1,
+    RC_LBL_NTP,    RC_NTP_BTN,
+    RC_LBL_SERVER, RC_SERVER_EDIT,
+    RC_LBL_OFFSET, RC_OFFSET_EDIT,
+    RC_DIV2,
+    RC_OK, RC_CANCEL,
+    RC_NOBJS
+};
+
+/* ================================================================== */
 /* WiFi/network settings editor (NC_*)                                 */
 /* Fase AC-5: local UI state only -- see netconfig.h. Country is a      */
 /* plain two-letter code field, validated and uppercased on OK (see     */
@@ -113,7 +134,7 @@ enum {
     NC_LBL_GATEWAY, NC_GATEWAY_EDIT,
     NC_LBL_DNS,     NC_DNS_EDIT,
     NC_DIV3,
-    NC_OK, NC_CANCEL,
+    NC_CLOCK_BTN, NC_OK, NC_CANCEL,
     NC_NOBJS
 };
 
@@ -172,6 +193,7 @@ static OBJECT cl_dlg[CL_NOBJS];
 static OBJECT sd_dlg[SD_NOBJS];
 static OBJECT te_dlg[TE_NOBJS];
 static OBJECT nc_dlg[NC_NOBJS];
+static OBJECT rc_dlg[RC_NOBJS];
 static OBJECT ov_dlg[OV_NOBJS];
 static OBJECT sw_dlg[SW_NOBJS];
 
@@ -265,6 +287,36 @@ static NetConfig g_netconfig_baseline;
 #define NETLOAD_BAD_STATUS  2 /* probe answered but the firmware status was not OK */
 static int g_netconfig_load_state = NETLOAD_UNAVAILABLE;
 static unsigned long g_netconfig_load_fw_status = SIDETNFS_NETCONFIG_STATUS_OK; /* only meaningful when load_state == NETLOAD_BAD_STATUS */
+
+/* ================================================================== */
+/* Clock/NTP editable-field buffers/TEDINFOs (RC_*, Fase 12 v1)        */
+/* NTP server reuses tmpl_host/vld_host (both 64 bytes, same as         */
+/* RTCCONFIG_NTP_SERVER_LEN) rather than allocating a duplicate         */
+/* template -- same sharing convention sd_path already uses for the     */
+/* drive editors. Free-form 'X' validation only, same "no character-    */
+/* class masking, real checks happen at OK time" convention as every    */
+/* other text field in this file (see shared_fields_init()). */
+#define RC_BUF_SERVER RTCCONFIG_NTP_SERVER_LEN /* 64 */
+#define RC_BUF_OFFSET RTCCONFIG_UTC_OFFSET_LEN /* 4: "-12"/"+14" + NUL */
+
+static char buf_rc_server[RC_BUF_SERVER];
+static char buf_rc_offset[RC_BUF_OFFSET];
+static char tmpl_rc_offset[RC_BUF_OFFSET], vld_rc_offset[RC_BUF_OFFSET];
+static TEDINFO ti_rc_server, ti_rc_offset;
+
+/* RC_NTP_BTN's own text doubles as the Yes/No display -- no separate
+ * value label, per the report's "button with changing text" fallback. */
+#define RC_BUF_NTP_VAL 9
+static char buf_rc_ntp_val[RC_BUF_NTP_VAL];
+static int rc_ntp_enabled; /* live edit state while the dialog is open */
+
+/* Session-persistent: survives across dialog opens/closes, like
+ * g_netconfig. */
+static RtcConfig g_rtcconfig;
+/* Snapshot of the last known-good (loaded-from-firmware or
+ * successfully-saved) RTC config -- same changed-since-baseline idiom
+ * as g_netconfig_baseline, see perform_save(). */
+static RtcConfig g_rtcconfig_baseline;
 
 /* ================================================================== */
 /* Drive-overview row text buffers                                     */
@@ -412,6 +464,16 @@ static void shared_fields_init(void)
     init_ti(&ti_nc_dns,      buf_nc_dns,      tmpl_nc_ipv4,     vld_nc_ipv4,     NC_BUF_IPV4);
 
     netconfig_init_defaults(&g_netconfig);
+
+    /* Fase 12 v1: same free-text ('X') convention -- the actual format
+     * (whole hour, -12..+14, optional leading '+') is enforced at OK
+     * time in rc_save_to_config(), not via TEDINFO character classes. */
+    fill_n(tmpl_rc_offset, '_', RC_BUF_OFFSET - 1); fill_n(vld_rc_offset, 'X', RC_BUF_OFFSET - 1);
+
+    init_ti(&ti_rc_server, buf_rc_server, tmpl_host,      vld_host,      RC_BUF_SERVER);
+    init_ti(&ti_rc_offset, buf_rc_offset, tmpl_rc_offset, vld_rc_offset, RC_BUF_OFFSET);
+
+    rtcconfig_init_defaults(&g_rtcconfig);
 }
 
 static const char *drive_type_name(DriveType t)
@@ -999,6 +1061,172 @@ static void network_startup_load(void)
 }
 
 /* ================================================================== */
+/* Wire <-> UI RTC/NTP-config translation (Fase 12A)                    */
+/* Explicit field-by-field, same reasoning as wire_to_ui_netconfig():   */
+/* never memcpy() between the wire struct and the UI struct, even       */
+/* though every field length happens to match numerically today.       */
+/* ================================================================== */
+
+static void wire_to_ui_rtcconfig(const SideTnfsRtcConfig *w, RtcConfig *rc)
+{
+    memset(rc, 0, sizeof(*rc));
+    rc->ntp_enabled = (w->enabled != 0UL) ? 1 : 0;
+    strncpy(rc->ntp_server, w->ntp_server, RTCCONFIG_NTP_SERVER_LEN - 1);
+    strncpy(rc->utc_offset, w->utc_offset, RTCCONFIG_UTC_OFFSET_LEN - 1);
+}
+
+static void ui_to_wire_rtcconfig(const RtcConfig *rc, SideTnfsRtcConfig *w)
+{
+    memset(w, 0, sizeof(*w));
+    w->enabled = (unsigned long)(rc->ntp_enabled ? 1 : 0);
+    strncpy(w->ntp_server, rc->ntp_server, SIDETNFS_RTC_NTP_SERVER_LEN - 1);
+    strncpy(w->utc_offset, rc->utc_offset, SIDETNFS_RTC_UTC_OFFSET_LEN - 1);
+}
+
+static const char *rtcconfig_status_text(unsigned long status)
+{
+    switch (status) {
+    case SIDETNFS_RTCCONFIG_STATUS_OK:                  return "OK.";
+    case SIDETNFS_RTCCONFIG_STATUS_INVALID_ENABLED:     return "Invalid NTP enabled setting.";
+    case SIDETNFS_RTCCONFIG_STATUS_INVALID_NTP_SERVER:  return "Invalid NTP server.";
+    case SIDETNFS_RTCCONFIG_STATUS_INVALID_UTC_OFFSET:  return "Invalid UTC offset.";
+    case SIDETNFS_RTCCONFIG_STATUS_NOT_STAGED:          return "No config staged.";
+    case SIDETNFS_RTCCONFIG_STATUS_FLASH_WRITE_FAILED:  return "Flash write failed.";
+    case SIDETNFS_RTCCONFIG_STATUS_FLASH_VERIFY_FAILED: return "Flash verify failed.";
+    default:                                            return "Unknown status.";
+    }
+}
+
+/* Silent building block, same shape as fetch_network_config_from_firmware():
+ * returns 1 on a fully consistent OK read, 0 on timeout or any non-OK
+ * status -- *out is left untouched on failure. */
+static int fetch_rtc_config_from_firmware(RtcConfig *out)
+{
+    SideTnfsRtcConfig wire;
+
+    if (sidetnfs_probe_get_rtc_config(&wire) != SIDETNFS_PROBE_OK)
+        return 0;
+    if (wire.status != SIDETNFS_RTCCONFIG_STATUS_OK)
+        return 0;
+
+    wire_to_ui_rtcconfig(&wire, out);
+    return 1;
+}
+
+/* Shared by rc_save_to_config() (live TEDINFO edit buffers, see the
+ * Clock/NTP editor above) and validate_rtcconfig() (perform_save()'s
+ * defensive re-check against the already-committed RtcConfig, once the
+ * dialog itself is closed and those edit buffers are gone) -- one
+ * validation rule set, exactly as asked: "use the existing CLOCK
+ * validation" rather than a second, independently-written copy of it. */
+static int rtcconfig_validate_fields(int enabled, const char *server, const char *offset, char *msg)
+{
+    const char *p;
+    long off;
+    char *end;
+
+    if (enabled && !buf_nonempty(server)) {
+        sprintf(msg, "[3][Validation error|NTP server is required.][OK]");
+        return 0;
+    }
+    for (p = server; *p; p++) {
+        if (*p == ' ') {
+            sprintf(msg, "[3][Validation error|NTP server may not contain|spaces.][OK]");
+            return 0;
+        }
+    }
+
+    off = strtol(offset, &end, 10);
+    if (offset[0] == '\0' || *end != '\0' || off < -12 || off > 14) {
+        sprintf(msg, "[3][Validation error|UTC offset must be a whole|number from -12 to +14.][OK]");
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Field-by-field local validation, mirroring validate_netconfig()'s
+ * shape -- the same defensive re-check pattern applied at Save time. */
+static int validate_rtcconfig(const RtcConfig *rc, char *msg)
+{
+    return rtcconfig_validate_fields(rc->ntp_enabled, rc->ntp_server, rc->utc_offset, msg);
+}
+
+/* 1 if any field differs -- drives Save's "only save RTC config if the
+ * user actually changed it" requirement, same idiom as netconfig_changed(). */
+static int rtcconfig_changed(const RtcConfig *a, const RtcConfig *b)
+{
+    if (a->ntp_enabled != b->ntp_enabled) return 1;
+    if (strcmp(a->ntp_server, b->ntp_server) != 0) return 1;
+    if (strcmp(a->utc_offset, b->utc_offset) != 0) return 1;
+    return 0;
+}
+
+/* Fase 12A: SET_RTC_CONFIG, then SAVE_RTC_CONFIG, then a full
+ * GET_RTC_CONFIG readback + compare -- same "stop at the first failure,
+ * never partially applied" shape as save_network_to_firmware(). Never
+ * calls SAVE_RTC_CONFIG if SET_RTC_CONFIG failed; on any failure *rc
+ * (the caller's live g_rtcconfig) is never touched here. */
+static int save_rtc_to_firmware(const RtcConfig *rc, char *msg)
+{
+    SideTnfsRtcConfig wire;
+    unsigned long status;
+    RtcConfig readback;
+
+    ui_to_wire_rtcconfig(rc, &wire);
+
+    if (sidetnfs_probe_set_rtc_config(&wire, &status) != SIDETNFS_PROBE_OK) {
+        sprintf(msg, "[3][Clock save failed|SET_RTC_CONFIG timed out.|Nothing was saved.][OK]");
+        return 0;
+    }
+    if (status != SIDETNFS_RTCCONFIG_STATUS_OK) {
+        sprintf(msg, "[3][Clock save failed|%s|Nothing was saved.][OK]", rtcconfig_status_text(status));
+        return 0;
+    }
+
+    if (sidetnfs_probe_save_rtc_config(&status) != SIDETNFS_PROBE_OK) {
+        sprintf(msg, "[3][Clock save failed|SAVE_RTC_CONFIG timed out.|Nothing was saved.][OK]");
+        return 0;
+    }
+    if (status != SIDETNFS_RTCCONFIG_STATUS_OK) {
+        sprintf(msg, "[3][Clock save failed|%s][OK]", rtcconfig_status_text(status));
+        return 0;
+    }
+
+    if (!fetch_rtc_config_from_firmware(&readback)) {
+        sprintf(msg, "[3][Clock save verification failed|Could not read back|the saved configuration.][OK]");
+        return 0;
+    }
+    if (rtcconfig_changed(rc, &readback)) {
+        sprintf(msg, "[3][Clock save verification failed|Flash contents do not match|the edited settings.][OK]");
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Fase 12A: startup counterpart to network_startup_load(), called right
+ * after it. A timeout OR a non-OK status both get the same silent
+ * fallback to the built-in defaults (rtcconfig_init_defaults(), set by
+ * shared_fields_init()) -- unlike network_startup_load(), this never
+ * alerts on a non-OK status either: firmware that predates Fase 12A
+ * (RTC_CONFIG unsupported) is an expected, normal condition here, not
+ * an error worth interrupting startup for. Either way
+ * g_rtcconfig_baseline is set equal to g_rtcconfig afterwards, so Save
+ * does not fire a spurious RTC save for a session that never touched
+ * the Clock dialog. */
+static void rtc_startup_load(void)
+{
+    SideTnfsRtcConfig wire;
+
+    if (sidetnfs_probe_get_rtc_config(&wire) == SIDETNFS_PROBE_OK
+        && wire.status == SIDETNFS_RTCCONFIG_STATUS_OK) {
+        wire_to_ui_rtcconfig(&wire, &g_rtcconfig);
+    }
+    g_rtcconfig_baseline = g_rtcconfig;
+}
+
+/* ================================================================== */
 /* Config-drive-letter editor                                          */
 /* Only the drive letter is editable; nickname/type are fixed context. */
 /* No Test, no Delete -- the config drive can never be removed.        */
@@ -1572,6 +1800,190 @@ static int add_disk_type_run(void)
 }
 
 /* ================================================================== */
+/* Clock/NTP editor (Fase 12, v1 -- KISS)                               */
+/* UI only, same shape as the WiFi/Network editor below: OK validates   */
+/* and copies the edit buffers into *rc; Cancel/ESC leaves *rc exactly  */
+/* as it was on entry. No firmware read/write yet -- see the SAVE TODO  */
+/* in perform_save(). */
+/* ================================================================== */
+
+static void rc_dialog_init(void)
+{
+    short cw, ch, bw, bh;
+    short sx, sy, sw, sh;
+    int rh, tm, pitch;
+    int DW, DH, xl, xf;
+    int yt, ydiv1, yntp, yserver, yoffset, ydiv2, ybtn;
+
+    graf_handle(&cw, &ch, &bw, &bh);
+    wind_get(0, WF_WORKXYWH, &sx, &sy, &sw, &sh);
+    if (sh <= 0 || sh > 800) sh = 200;
+
+    rh    = (sh >= 350) ? (int)ch : ((ch > 8) ? ch / 2 : (int)ch);
+    tm    = (rh / 4 > 2) ? rh / 4 : 2;
+    pitch = rh + 3;
+
+    DW = 54 * cw;
+    xl = 2 * cw;
+    xf = 29 * cw; /* past "Set Atari clock using NTP:" (26 chars) + margin */
+
+    yt      = tm;
+    ydiv1   = yt + rh + 1;
+    yntp    = ydiv1 + 5;
+    yserver = yntp + pitch;
+    yoffset = yserver + pitch;
+    ydiv2   = yoffset + rh + 2;
+    ybtn    = ydiv2 + 7;
+    DH      = ybtn + rh + tm + 3;
+
+    set_obj(rc_dlg, RC_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
+    rc_dlg[RC_ROOT].ob_spec.index = 0x00031070L;
+
+    set_obj(rc_dlg, RC_TITLE, G_STRING, NONE, NORMAL, 20*cw, yt, 14*cw, rh);
+    rc_dlg[RC_TITLE].ob_spec.free_string = "Clock / NTP";
+
+    set_obj(rc_dlg, RC_DIV1, G_BOX, NONE, NORMAL, cw, ydiv1, DW - 2*cw, 2);
+    rc_dlg[RC_DIV1].ob_spec.index = 0x00001171L;
+
+    set_obj(rc_dlg, RC_LBL_NTP, G_STRING, NONE, NORMAL, xl, yntp, 26*cw, rh);
+    rc_dlg[RC_LBL_NTP].ob_spec.free_string = "Set Atari clock using NTP:";
+    set_obj(rc_dlg, RC_NTP_BTN, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, xf, yntp, 8*cw, rh);
+    rc_dlg[RC_NTP_BTN].ob_spec.free_string = buf_rc_ntp_val;
+
+    set_obj(rc_dlg, RC_LBL_SERVER, G_STRING, NONE, NORMAL, xl, yserver, 26*cw, rh);
+    rc_dlg[RC_LBL_SERVER].ob_spec.free_string = "NTP server:";
+    set_obj(rc_dlg, RC_SERVER_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, yserver, 20*cw, rh);
+    rc_dlg[RC_SERVER_EDIT].ob_spec.tedinfo = &ti_rc_server;
+
+    set_obj(rc_dlg, RC_LBL_OFFSET, G_STRING, NONE, NORMAL, xl, yoffset, 26*cw, rh);
+    rc_dlg[RC_LBL_OFFSET].ob_spec.free_string = "UTC offset:";
+    set_obj(rc_dlg, RC_OFFSET_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, yoffset, 4*cw, rh);
+    rc_dlg[RC_OFFSET_EDIT].ob_spec.tedinfo = &ti_rc_offset;
+
+    set_obj(rc_dlg, RC_DIV2, G_BOX, NONE, NORMAL, cw, ydiv2, DW - 2*cw, 2);
+    rc_dlg[RC_DIV2].ob_spec.index = 0x00001171L;
+
+    set_obj(rc_dlg, RC_OK, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, 17*cw, ybtn, 8*cw, rh);
+    rc_dlg[RC_OK].ob_spec.free_string = "   OK   ";
+
+    set_obj(rc_dlg, RC_CANCEL, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 28*cw, ybtn, 8*cw, rh);
+    rc_dlg[RC_CANCEL].ob_spec.free_string = " Cancel ";
+
+    wire_tree(rc_dlg, RC_NOBJS);
+
+    (void)sx; (void)sy; (void)sw; (void)bw; (void)bh;
+}
+
+static void rc_update_ntp_button_text(void)
+{
+    strncpy(buf_rc_ntp_val, rc_ntp_enabled ? "  Yes   " : "  No    ", RC_BUF_NTP_VAL - 1);
+    buf_rc_ntp_val[RC_BUF_NTP_VAL - 1] = '\0';
+}
+
+static void rc_load_from_config(const RtcConfig *rc)
+{
+    rc_ntp_enabled = rc->ntp_enabled;
+    rc_update_ntp_button_text();
+    set_buf(buf_rc_server, RC_BUF_SERVER, rc->ntp_server);
+    set_buf(buf_rc_offset, RC_BUF_OFFSET, rc->utc_offset);
+}
+
+/* Returns 1 on success (fields copied into *rc), 0 on a validation
+ * failure -- *rc is left untouched on failure, same "reject and stay
+ * open" pattern as nc_save_to_config(). Normalizes utc_offset to the
+ * canonical form ("0", "+1", "-5", "+14") regardless of how the user
+ * typed it (a leading '+' is optional on input). */
+static int rc_save_to_config(RtcConfig *rc)
+{
+    char server[RC_BUF_SERVER];
+    char offset[RC_BUF_OFFSET];
+    char msg[100];
+    long off;
+    char *end;
+
+    /* buf_copy() strips the trailing spaces GEM pads editable fields
+     * with, same as every other text field in this file. */
+    buf_copy(buf_rc_server, server, sizeof(server));
+    buf_copy(buf_rc_offset, offset, sizeof(offset));
+
+    /* Same validation rtcconfig_validate_fields() also runs at Save
+     * time against the committed RtcConfig (validate_rtcconfig()) --
+     * one rule set, not two independently-written copies of it. */
+    if (!rtcconfig_validate_fields(rc_ntp_enabled, server, offset, msg)) {
+        form_alert(1, msg);
+        return 0;
+    }
+
+    /* strtol() accepts an optional leading '+'/'-', matching the
+     * accepted input notation exactly; already range/format-checked by
+     * rtcconfig_validate_fields() above. */
+    off = strtol(offset, &end, 10);
+    (void)end;
+
+    rc->ntp_enabled = rc_ntp_enabled;
+    strncpy(rc->ntp_server, server, RTCCONFIG_NTP_SERVER_LEN - 1);
+    rc->ntp_server[RTCCONFIG_NTP_SERVER_LEN - 1] = '\0';
+
+    if (off == 0)
+        strncpy(rc->utc_offset, "0", RTCCONFIG_UTC_OFFSET_LEN - 1);
+    else
+        sprintf(rc->utc_offset, "%+ld", off);
+    rc->utc_offset[RTCCONFIG_UTC_OFFSET_LEN - 1] = '\0';
+
+    return 1;
+}
+
+static void rtc_editor_run(RtcConfig *rc)
+{
+    short x, y, w, h;
+    short which;
+    short start_obj;
+    int done;
+
+    rc_dialog_init();
+    rc_load_from_config(rc);
+
+    form_center(rc_dlg, &x, &y, &w, &h);
+    form_dial(FMD_START, x, y, w, h, x, y, w, h);
+    objc_draw(rc_dlg, RC_ROOT, MAX_DEPTH, x, y, w, h);
+
+    done = 0;
+    start_obj = RC_SERVER_EDIT;
+    while (!done) {
+        which = (short)(form_do(rc_dlg, start_obj) & 0x7FFF);
+        wait_mouse_release();
+        start_obj = RC_SERVER_EDIT;
+
+        switch (which) {
+        case RC_NTP_BTN:
+            rc_ntp_enabled = !rc_ntp_enabled;
+            rc_update_ntp_button_text();
+            /* Full-tree redraw, same choice as NC_DHCP_BTN/NC_STATIC_BTN:
+             * this dialog is small enough that the flicker is a non-issue,
+             * and it sidesteps the G_STRING/G_BUTTON background-clear
+             * pitfall documented at nc_redraw_auth_val() entirely. */
+            objc_draw(rc_dlg, RC_ROOT, MAX_DEPTH, x, y, w, h);
+            break;
+
+        case RC_OK:
+            if (!rc_save_to_config(rc)) {
+                start_obj = RC_SERVER_EDIT;
+                break;
+            }
+            done = 1;
+            break;
+
+        case RC_CANCEL:
+        default:
+            done = 1;
+            break;
+        }
+    }
+
+    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+}
+
+/* ================================================================== */
 /* WiFi/network settings editor (Fase AC-5)                            */
 /* UI only: no firmware read/write, no flash, no file. OK copies the   */
 /* edit buffers into *nc; Cancel (or ESC, see netconfig_editor_run())  */
@@ -1691,6 +2103,9 @@ static void nc_dialog_init(void)
 
     set_obj(nc_dlg, NC_DIV3, G_BOX, NONE, NORMAL, cw, ydiv3, DW - 2*cw, 2);
     nc_dlg[NC_DIV3].ob_spec.index = 0x00001171L;
+
+    set_obj(nc_dlg, NC_CLOCK_BTN, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 38*cw, ybtn, 9*cw, rh);
+    nc_dlg[NC_CLOCK_BTN].ob_spec.free_string = "  Clock  ";
 
     set_obj(nc_dlg, NC_OK, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, 15*cw, ybtn, 8*cw, rh);
     nc_dlg[NC_OK].ob_spec.free_string = "   OK   ";
@@ -1912,6 +2327,17 @@ static void netconfig_editor_run(NetConfig *nc)
             nc_redraw_auth_val(x, y, w, h);
             break;
 
+        case NC_CLOCK_BTN:
+            /* Fully nested modal, same proven shape as SW_CONFIG opening
+             * this very dialog from the status window: rtc_editor_run()
+             * owns its own complete form_dial(FMD_START)/form_do()/
+             * form_dial(FMD_FINISH) cycle, so no state is left hanging
+             * here -- the explicit NC_ROOT redraw below is what restores
+             * this dialog afterward. */
+            rtc_editor_run(&g_rtcconfig);
+            objc_draw(nc_dlg, NC_ROOT, MAX_DEPTH, x, y, w, h);
+            break;
+
         case NC_OK:
             if (!nc_save_to_config(nc)) {
                 start_obj = NC_COUNTRY_EDIT; /* refocus on the field that failed */
@@ -2030,22 +2456,24 @@ static long atari_do_reset(void)
 }
 
 /* The only place that ever writes to firmware: the status window's own
- * SAVE button (SW_SAVE). Covers both the drive list and, if the user
- * actually changed it, the wifi/network config (separate SET/SAVE
- * commands each, see save_to_firmware()/save_network_to_firmware()).
- * Stops at the first failure; a failed network save leaves g_netconfig
- * exactly as the user left it (never silently replaced), and drives
- * already saved before it stay saved regardless. Returns 1 if the
- * caller's window should close afterwards (drives and, if applicable,
- * network both fully saved and read back -- a reboot is needed before
- * either takes effect, so there is nothing left to do in this run), 0
- * to keep it open. */
+ * SAVE button (SW_SAVE). Covers the drive list and, if the user
+ * actually changed them, the wifi/network config and the RTC/NTP
+ * config (separate SET/SAVE commands each, see
+ * save_to_firmware()/save_network_to_firmware()/save_rtc_to_firmware()).
+ * Stops at the first failure; a failed network or RTC save leaves
+ * g_netconfig/g_rtcconfig exactly as the user left them (never silently
+ * replaced), and anything already saved before it stays saved
+ * regardless. Returns 1 if the caller's window should close afterwards
+ * (everything that changed is fully saved and read back -- a reboot is
+ * needed before any of it takes effect, so there is nothing left to do
+ * in this run), 0 to keep it open. */
 static int perform_save(DriveConfig *cfg, int firmware_backed)
 {
     int i;
     int all_valid = 1;
     char msg[220];
     int network_changed;
+    int rtc_changed;
 
     if (drive_config_ordinary_count(cfg) > MAX_ORDINARY_DRIVES) {
         sprintf(msg, "[3][Validation error|Too many drives (max %d).][OK]", MAX_ORDINARY_DRIVES);
@@ -2062,13 +2490,21 @@ static int perform_save(DriveConfig *cfg, int firmware_backed)
         }
     }
 
-    /* Only validate/save network config if the user actually changed
-     * it since it was loaded (or last saved) -- opening/closing the
-     * Config dialog without real edits must never trigger a network
-     * save. */
+    /* Only validate/save network (or RTC) config if the user actually
+     * changed it since it was loaded (or last saved) -- opening/closing
+     * the Config or Clock dialog without real edits must never trigger
+     * a save. */
     network_changed = netconfig_changed(&g_netconfig, &g_netconfig_baseline);
     if (all_valid && network_changed) {
         if (!validate_netconfig(&g_netconfig, msg)) {
+            form_alert(1, msg);
+            all_valid = 0;
+        }
+    }
+
+    rtc_changed = rtcconfig_changed(&g_rtcconfig, &g_rtcconfig_baseline);
+    if (all_valid && rtc_changed) {
+        if (!validate_rtcconfig(&g_rtcconfig, msg)) {
             form_alert(1, msg);
             all_valid = 0;
         }
@@ -2084,8 +2520,8 @@ static int perform_save(DriveConfig *cfg, int firmware_backed)
         return 0;
     }
 
-    /* Drives first (existing, proven flow); network second, only if
-     * actually changed. Stop at the first failure either way. */
+    /* Drives first (existing, proven flow); network and RTC after,
+     * each only if actually changed. Stop at the first failure. */
     if (!save_to_firmware(cfg, msg)) {
         form_alert(1, msg);
         return 0;
@@ -2097,14 +2533,32 @@ static int perform_save(DriveConfig *cfg, int firmware_backed)
             return 0; /* drives already saved; g_netconfig left untouched */
         }
         g_netconfig_baseline = g_netconfig; /* new known-good baseline */
+    }
 
+    if (rtc_changed) {
+        if (!save_rtc_to_firmware(&g_rtcconfig, msg)) {
+            form_alert(1, msg);
+            return 0; /* drives/network already saved; g_rtcconfig left untouched */
+        }
+        g_rtcconfig_baseline = g_rtcconfig; /* new known-good baseline */
+    }
+
+    if (network_changed || rtc_changed) {
         /* No Reset Now button here: an Atari reset does not reset the
-         * Pico, so it would not actually make the new wifi settings
-         * active -- offering it would contradict the message below.
+         * Pico, so it would not actually make the new settings active
+         * -- offering it would contradict the message below.
          * Activating them needs a genuine Sidecartridge restart, which
          * this program has no way to trigger. */
-        form_alert(1, "[1][Network settings saved.|They become active after|"
-                      "restarting the Sidecartridge.][OK]");
+        if (network_changed && rtc_changed) {
+            form_alert(1, "[1][Network and clock settings saved.|They become active after|"
+                          "restarting the Sidecartridge.][OK]");
+        } else if (network_changed) {
+            form_alert(1, "[1][Network settings saved.|They become active after|"
+                          "restarting the Sidecartridge.][OK]");
+        } else {
+            form_alert(1, "[1][Clock settings saved.|They become active after|"
+                          "restarting the Sidecartridge.][OK]");
+        }
     } else {
         /* Cancel is the default (button 1): a full-machine reset is
          * easy to trigger by accident otherwise. */
@@ -2469,6 +2923,11 @@ void dialog_run(DriveConfig *cfg)
      * regardless of firmware_backed -- with no firmware at all this
      * simply times out too and falls back the same way. */
     network_startup_load();
+
+    /* Fase 12A (RTC/NTP protocol): loaded after network config, same
+     * fallback shape -- unsupported (older) firmware or no firmware at
+     * all both just leave g_rtcconfig at its built-in defaults. */
+    rtc_startup_load();
 
     sw_dialog_init();
     status_window_refresh(cfg);
