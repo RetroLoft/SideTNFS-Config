@@ -2293,20 +2293,30 @@ static void sw_dialog_init(void)
     sw_dlg[SW_DIV4].ob_spec.index = 0x00001171L;
 
     set_obj(sw_dlg, SW_CONFIG, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 2*cw, ybtn, 9*cw, rh);
-    sw_dlg[SW_CONFIG].ob_spec.free_string = " CONFIG  ";
+    sw_dlg[SW_CONFIG].ob_spec.free_string = " Config  ";
 
     set_obj(sw_dlg, SW_DRIVES, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 12*cw, ybtn, 9*cw, rh);
-    sw_dlg[SW_DRIVES].ob_spec.free_string = " DRIVES  ";
+    sw_dlg[SW_DRIVES].ob_spec.free_string = " Drives  ";
 
     set_obj(sw_dlg, SW_SAVE, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, 22*cw, ybtn, 9*cw, rh);
-    sw_dlg[SW_SAVE].ob_spec.free_string = "  SAVE   ";
+    sw_dlg[SW_SAVE].ob_spec.free_string = "  Save   ";
 
     set_obj(sw_dlg, SW_QUIT, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 32*cw, ybtn, 9*cw, rh);
-    sw_dlg[SW_QUIT].ob_spec.free_string = "  QUIT   ";
+    sw_dlg[SW_QUIT].ob_spec.free_string = "  Quit   ";
 
     wire_tree(sw_dlg, SW_NOBJS);
 
     (void)sx; (void)sy; (void)ssw; (void)bw; (void)bh;
+}
+
+/* Left-justifies label in a 13-column field ("TNFS server:", the
+ * longest label, is exactly 12 chars + this pads one trailing space),
+ * so every value in the Network section starts at the same column 14,
+ * regardless of which label it follows. */
+static void sw_set_net_line(int idx, const char *label, const char *value)
+{
+    sprintf(sw_net_line[idx], "%-13s%.34s", label, value);
+    sw_net_line[idx][SW_LINE_BUF - 1] = '\0';
 }
 
 /* Reads only g_netconfig (the one-time network_startup_load() result,
@@ -2319,40 +2329,35 @@ static void status_refresh_network(const DriveConfig *cfg)
     int i;
     int tnfs_count = 0;
     const Drive *first_tnfs = 0;
+    char value[40];
 
     /* "Configured" only means the saved configuration was read
      * successfully -- 0x0413 returns stored config, not a live Wi-Fi
      * association proof, so this is deliberately never "Connected". */
     switch (g_netconfig_load_state) {
     case NETLOAD_OK:
-        strncpy(sw_net_line[0], "Status: Configured", SW_LINE_BUF - 1);
+        strncpy(value, "Configured", sizeof(value) - 1);
         break;
     case NETLOAD_BAD_STATUS:
-        sprintf(sw_net_line[0], "Status: %s", netconfig_status_text(g_netconfig_load_fw_status));
+        strncpy(value, netconfig_status_text(g_netconfig_load_fw_status), sizeof(value) - 1);
         break;
     case NETLOAD_UNAVAILABLE:
     default:
-        strncpy(sw_net_line[0], "Status: Unavailable", SW_LINE_BUF - 1);
+        strncpy(value, "Unavailable", sizeof(value) - 1);
         break;
     }
-    sw_net_line[0][SW_LINE_BUF - 1] = '\0';
+    value[sizeof(value) - 1] = '\0';
+    sw_set_net_line(0, "Status:", value);
 
     /* SSID only -- the password is never shown here. */
-    if (g_netconfig.ssid[0] != '\0')
-        sprintf(sw_net_line[1], "SSID: %s", g_netconfig.ssid);
-    else
-        strncpy(sw_net_line[1], "SSID: -", SW_LINE_BUF - 1);
-    sw_net_line[1][SW_LINE_BUF - 1] = '\0';
+    sw_set_net_line(1, "SSID:", (g_netconfig.ssid[0] != '\0') ? g_netconfig.ssid : "-");
 
     /* DHCP mode shows "DHCP", not the stored static-IP field -- the
      * actual DHCP-assigned address is unknown to this protocol. */
     if (g_netconfig.ip_mode == NETCONFIG_MODE_DHCP)
-        strncpy(sw_net_line[2], "IP address: DHCP", SW_LINE_BUF - 1);
-    else if (g_netconfig.ip_address[0] != '\0')
-        sprintf(sw_net_line[2], "IP address: %s", g_netconfig.ip_address);
+        sw_set_net_line(2, "IP address:", "DHCP");
     else
-        strncpy(sw_net_line[2], "IP address: -", SW_LINE_BUF - 1);
-    sw_net_line[2][SW_LINE_BUF - 1] = '\0';
+        sw_set_net_line(2, "IP address:", (g_netconfig.ip_address[0] != '\0') ? g_netconfig.ip_address : "-");
 
     /* TNFS server comes from the local DriveConfig, not g_netconfig --
      * no firmware command sent for this line either. */
@@ -2363,13 +2368,15 @@ static void status_refresh_network(const DriveConfig *cfg)
             tnfs_count++;
         }
     }
-    if (tnfs_count == 0)
-        strncpy(sw_net_line[3], "TNFS server: -", SW_LINE_BUF - 1);
-    else if (tnfs_count == 1)
-        sprintf(sw_net_line[3], "TNFS server: %.28s:%d", first_tnfs->host, first_tnfs->port);
-    else
-        sprintf(sw_net_line[3], "TNFS server: %.20s +%d", first_tnfs->host, tnfs_count - 1);
-    sw_net_line[3][SW_LINE_BUF - 1] = '\0';
+    if (tnfs_count == 0) {
+        sw_set_net_line(3, "TNFS server:", "-");
+    } else {
+        if (tnfs_count == 1)
+            sprintf(value, "%.28s:%d", first_tnfs->host, first_tnfs->port);
+        else
+            sprintf(value, "%.20s +%d", first_tnfs->host, tnfs_count - 1);
+        sw_set_net_line(3, "TNFS server:", value);
+    }
 }
 
 /* Fase AC-6: placeholder -- RTC settings/status follow in a separate
@@ -2403,16 +2410,20 @@ static void status_refresh_drives(const DriveConfig *cfg)
 
     for (i = 0; i < shown; i++) {
         const Drive *d = &cfg->drives[i];
-        const char *path;
+        const char *type_abbrev;
 
+        /* Status-window-only abbreviation (CFG/SD/TNFS) -- the roomier
+         * Drives sub-window still uses drive_type_name()'s full names.
+         * No path column here (see the Drives window for full detail);
+         * dropping it frees the space to show more of the nickname. */
         switch (d->type) {
-        case DRIVE_TYPE_TNFS: path = (d->mount_path[0] != '\0') ? d->mount_path : "/"; break;
-        case DRIVE_TYPE_SD:   path = d->sd_path; break;
-        case DRIVE_TYPE_CONFIG:
-        default:              path = "-"; break;
+        case DRIVE_TYPE_CONFIG: type_abbrev = "CFG";  break;
+        case DRIVE_TYPE_SD:     type_abbrev = "SD";   break;
+        case DRIVE_TYPE_TNFS:   type_abbrev = "TNFS"; break;
+        default:                type_abbrev = "?";    break;
         }
-        sprintf(sw_drive_line[i], "%c:  %-10.10s %-6s %-18.18s",
-                d->letter, d->nickname, drive_type_name(d->type), path);
+        sprintf(sw_drive_line[i], "%c:  %-30.30s%4s",
+                d->letter, d->nickname, type_abbrev);
     }
 
     if (overflow) {
