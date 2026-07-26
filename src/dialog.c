@@ -55,6 +55,7 @@ enum {
     SD_LBL_DRIVE, SD_DRIVE_EDIT,
     SD_LBL_NICK,  SD_NICK_EDIT,
     SD_LBL_PATH,  SD_PATH_EDIT,
+    SD_LBL_ACTIVE, SD_ACTIVE_BTN,
     SD_DIV2,
     SD_DELETE, SD_OK, SD_CANCEL,
     SD_NOBJS
@@ -73,6 +74,7 @@ enum {
     TE_LBL_PORT,  TE_PORT_EDIT,
     TE_LBL_TRANSPORT, TE_TRANSPORT_VAL, TE_TRANSPORT_TCP,
     TE_LBL_MOUNT, TE_MOUNT_EDIT, TE_MOUNT_HINT,
+    TE_LBL_ACTIVE, TE_ACTIVE_BTN,
     TE_DIV2,
     TE_TEST, TE_DELETE, TE_OK, TE_CANCEL,
     TE_NOBJS
@@ -140,21 +142,29 @@ enum {
 
 /* ================================================================== */
 /* Drive overview / main dialog (OV_*)                                 */
+/* AtariConfig-3: eight FIXED rows (index == firmware slot index),      */
+/* never compacted/re-sorted, plus one row for the SETTINGS disk        */
+/* letter (not one of the eight -- see drive.h). Each slot row's own    */
+/* button reads "Add" (EMPTY) or "Edit" (DISABLED/ENABLED); there is no */
+/* separate top-level Add button anymore, since there is no longer a    */
+/* single well-defined "next free slot" -- the user picks the slot by   */
+/* clicking its own row.                                                */
 /* ================================================================== */
 enum {
     OV_ROOT = 0,
     OV_TITLE,
     OV_DIV1,
+    OV_LBL_SETTINGS, OV_SETTINGS_VAL, OV_SETTINGS_BTN,
+    OV_DIV2,
     OV_ROW_BASE
 };
 #define OV_ROW_TEXT(i) (OV_ROW_BASE + (i)*2 + 0)
-#define OV_ROW_EDIT(i) (OV_ROW_BASE + (i)*2 + 1)
+#define OV_ROW_BTN(i)  (OV_ROW_BASE + (i)*2 + 1)
 #define OV_AFTER_ROWS  (OV_ROW_BASE + MAX_DRIVES*2)
-#define OV_DIV2   (OV_AFTER_ROWS + 0)
-#define OV_ADD    (OV_AFTER_ROWS + 1)
-#define OV_OK     (OV_AFTER_ROWS + 2)
-#define OV_CANCEL (OV_AFTER_ROWS + 3)
-#define OV_NOBJS  (OV_AFTER_ROWS + 4)
+#define OV_DIV3   (OV_AFTER_ROWS + 0)
+#define OV_OK     (OV_AFTER_ROWS + 1)
+#define OV_CANCEL (OV_AFTER_ROWS + 2)
+#define OV_NOBJS  (OV_AFTER_ROWS + 3)
 
 /* ================================================================== */
 /* Status window (SW_*) -- Fase AC-6                                    */
@@ -224,6 +234,17 @@ static char tmpl_mount[TE_BUF_MOUNT], vld_mount[TE_BUF_MOUNT];
 
 static TEDINFO ti_te_drive, ti_te_nick, ti_te_host, ti_te_port, ti_te_mount, ti_sd_path;
 
+/* AtariConfig-3: Active/Inactive toggle, shared between the SD and TNFS
+ * editors (never open simultaneously, same sharing convention as the
+ * buffers above) -- single button, own text doubles as the value
+ * display, same "button with changing text" idiom as the Clock/NTP
+ * editor's NTP-enabled toggle. Only meaningful for a slot that is
+ * DISABLED or ENABLED at OK time; an EMPTY slot defaults to ENABLED
+ * unless the user explicitly toggles it off before OK (see the report). */
+#define DRIVE_ACTIVE_BUF 11
+static char buf_drive_active[DRIVE_ACTIVE_BUF];
+static int drive_editor_enabled; /* 1 = Active/ENABLED, 0 = Inactive/DISABLED -- live edit state */
+
 /* ================================================================== */
 /* WiFi/network editable-field buffers/TEDINFOs (NC_*, Fase AC-5)      */
 /* Distinct field sizes from the drive editors above -- netconfig.h    */
@@ -270,6 +291,12 @@ static unsigned long nc_auth_original; /* raw value at load time, kept verbatim 
  * placeholder at OK time, the existing password is kept untouched;
  * anything else typed replaces it. */
 static const char NC_PASSWORD_PLACEHOLDER[] = "********";
+
+/* Snapshot of the last known-good (loaded-from-firmware or
+ * successfully-saved) drive configuration -- same changed-since-baseline
+ * idiom as g_netconfig_baseline/g_rtcconfig_baseline below, used only to
+ * warn on Quit with unsaved drive changes (see dialog_run()). */
+static DriveConfig g_driveconfig_baseline;
 
 static NetConfig g_netconfig;
 /* Snapshot of the last known-good (loaded-from-firmware or
@@ -321,8 +348,10 @@ static RtcConfig g_rtcconfig_baseline;
 /* ================================================================== */
 /* Drive-overview row text buffers                                     */
 /* ================================================================== */
-#define OV_ROW_BUF 40
+#define OV_ROW_BUF 44
 static char ov_row_text[MAX_DRIVES][OV_ROW_BUF];
+#define OV_SETTINGS_BUF 24
+static char ov_settings_val[OV_SETTINGS_BUF];
 
 /* ================================================================== */
 /* Status window text buffers (Fase AC-6)                              */
@@ -420,6 +449,12 @@ static void buf_copy(const char *buf, char *dest, int destlen)
     while (n > 0 && dest[n-1] == ' ') dest[--n] = '\0';
 }
 
+static void update_drive_active_button_text(void)
+{
+    strncpy(buf_drive_active, drive_editor_enabled ? " Active   " : " Inactive ", DRIVE_ACTIVE_BUF - 1);
+    buf_drive_active[DRIVE_ACTIVE_BUF - 1] = '\0';
+}
+
 /* Wait for left mouse button to be released (for use after TOUCHEXIT). */
 static void wait_mouse_release(void)
 {
@@ -476,29 +511,28 @@ static void shared_fields_init(void)
     rtcconfig_init_defaults(&g_rtcconfig);
 }
 
-static const char *drive_type_name(DriveType t)
-{
-    switch (t) {
-    case DRIVE_TYPE_CONFIG: return "CONFIG";
-    case DRIVE_TYPE_SD:     return "SD";
-    case DRIVE_TYPE_TNFS:   return "TNFS";
-    default:                return "?";
-    }
-}
-
 /* ================================================================== */
 /* Shared drive validation -- used both by each editor's Test/OK and by */
 /* Save's full-list check. msg must be at least 100 bytes.             */
 /* ================================================================== */
 static int validate_drive(const Drive *d, const DriveConfig *cfg, int skip_index, char *msg)
 {
+    int i;
+
     if (d->letter < 'A' || d->letter > 'Z' || d->letter == 'A' || d->letter == 'B') {
         sprintf(msg, "[3][Validation error|Drive %c: invalid letter.][OK]", d->letter);
         return 0;
     }
-    if (drive_config_letter_in_use(cfg, d->letter, skip_index)) {
-        sprintf(msg, "[3][Validation error|Drive %c: letter already used.][OK]", d->letter);
+    if (d->letter == cfg->settings_letter) {
+        sprintf(msg, "[3][Validation error|Drive letter %c: is reserved|for the SETTINGS disk.][OK]", d->letter);
         return 0;
+    }
+    for (i = 0; i < MAX_DRIVES; i++) {
+        if (i == skip_index) continue;
+        if (drive_slot_is_configured(&cfg->drives[i]) && cfg->drives[i].letter == d->letter) {
+            sprintf(msg, "[3][Validation error|Drive letter %c: is already used|by slot %d.][OK]", d->letter, i + 1);
+            return 0;
+        }
     }
     if (!buf_nonempty(d->nickname)) {
         sprintf(msg, "[3][Validation error|Drive %c: nickname is empty.][OK]", d->letter);
@@ -529,19 +563,46 @@ static int validate_drive(const Drive *d, const DriveConfig *cfg, int skip_index
             return 0;
         }
         break;
-    case DRIVE_TYPE_CONFIG:
     default:
         break;
     }
     return 1;
 }
 
+/* Symbolic text for every sidetnfs_config_status_t value (sidetnfs_config.h),
+ * same convention as netconfig_status_text()/rtcconfig_status_text() --
+ * every drive/SETTINGS-letter protocol error the user can hit (SET_DRIVE,
+ * DELETE_DRIVE, SET_CONFIG_DRIVE, SAVE_CONFIG) is shown by name, never as
+ * a bare status number. */
+static const char *sidetnfs_drive_status_text(unsigned long status)
+{
+    switch (status) {
+    case SIDETNFS_STATUS_OK:                     return "OK.";
+    case SIDETNFS_STATUS_INVALID_INDEX:          return "Invalid slot index.";
+    case SIDETNFS_STATUS_EMPTY_SLOT:             return "Slot is empty.";
+    case SIDETNFS_STATUS_INVALID_DRIVE_LETTER:   return "Invalid drive letter.";
+    case SIDETNFS_STATUS_DUPLICATE_DRIVE_LETTER: return "Duplicate drive letter.";
+    case SIDETNFS_STATUS_INVALID_TYPE:           return "Invalid drive type.";
+    case SIDETNFS_STATUS_INVALID_TRANSPORT:      return "Invalid transport.";
+    case SIDETNFS_STATUS_INVALID_PORT:           return "Invalid port.";
+    case SIDETNFS_STATUS_INVALID_HOST:           return "Invalid host.";
+    case SIDETNFS_STATUS_INVALID_MOUNT_PATH:     return "Invalid mount path.";
+    case SIDETNFS_STATUS_INVALID_SD_PATH:        return "Invalid SD path.";
+    case SIDETNFS_STATUS_TOO_MANY_DRIVES:        return "Too many drives.";
+    case SIDETNFS_STATUS_FLASH_WRITE_FAILED:     return "Flash write failed.";
+    case SIDETNFS_STATUS_CRC_MISMATCH:           return "Flash CRC mismatch.";
+    case SIDETNFS_STATUS_UNSUPPORTED_VERSION:    return "Unsupported protocol version.";
+    case SIDETNFS_STATUS_INVALID_DRIVE_STATE:    return "Invalid drive state.";
+    default:                                     return "Unknown status.";
+    }
+}
+
 /* ================================================================== */
-/* Firmware probe (Fase AC-4, protocol v2). Protocol v2 has no "active   */
-/* server" concept -- it shows the GET_CONFIG_INFO summary, then the    */
-/* record at a fixed representative slot 0 (the UI does not yet track a */
-/* per-drive firmware slot index for an in-progress edit). Explicitly   */
-/* not a network connection test of the drive being edited.             */
+/* Firmware probe (Fase AC-4, protocol v3). Shows the GET_CONFIG_INFO   */
+/* summary, then the record at a fixed representative slot 1 (the UI    */
+/* does not yet track a per-drive firmware slot index for an            */
+/* in-progress edit). Explicitly not a network connection test of the   */
+/* drive being edited.                                                  */
 /* ================================================================== */
 static void dialog_probe_firmware(void)
 {
@@ -554,18 +615,18 @@ static void dialog_probe_firmware(void)
         return;
     }
     if (config_info.status != SIDETNFS_STATUS_OK) {
-        sprintf(msg, "[3][SideTNFS firmware|Unexpected status %lu.][OK]", config_info.status);
+        sprintf(msg, "[3][SideTNFS firmware|%s][OK]", sidetnfs_drive_status_text(config_info.status));
         form_alert(1, msg);
         return;
     }
-    if (config_info.protocol_version != 2) {
-        sprintf(msg, "[3][Unexpected protocol version|Got %lu, expected 2.][OK]",
-                config_info.protocol_version);
+    if (config_info.protocol_version != SIDETNFS_CONFIG_PROTOCOL_VERSION) {
+        sprintf(msg, "[3][Unsupported SideTNFS configuration protocol|Firmware: %lu|Application: %lu][OK]",
+                config_info.protocol_version, SIDETNFS_CONFIG_PROTOCOL_VERSION);
         form_alert(1, msg);
         return;
     }
 
-    sprintf(msg, "[1][Firmware configuration|Config drive: %c:|Drives stored: %lu][OK]",
+    sprintf(msg, "[1][Firmware configuration|SETTINGS disk: %c:|Configured drives: %lu][OK]",
             (char)config_info.config_drive_letter, config_info.drive_count);
     form_alert(1, msg);
 
@@ -573,28 +634,34 @@ static void dialog_probe_firmware(void)
         form_alert(1, "[3][SideTNFS drive|GET_DRIVE(0) timed out.][OK]");
         return;
     }
+    if (drive_info.status != SIDETNFS_STATUS_OK) {
+        sprintf(msg, "[3][SideTNFS drive|%s][OK]", sidetnfs_drive_status_text(drive_info.status));
+        form_alert(1, msg);
+        return;
+    }
 
-    switch (drive_info.status) {
-    case SIDETNFS_STATUS_OK:
+    switch (drive_info.state) {
+    case SIDETNFS_DRIVE_STATE_EMPTY:
+        form_alert(1, "[1][Slot 1|Empty.][OK]");
+        break;
+    case SIDETNFS_DRIVE_STATE_DISABLED:
+    case SIDETNFS_DRIVE_STATE_ENABLED:
         if (drive_info.type == SIDETNFS_DRIVE_TYPE_TNFS) {
-            sprintf(msg, "[1][Slot 0 (not a network test)|%c: %s|%s:%lu|%s / %s][OK]",
+            sprintf(msg, "[1][Slot 1 (not a network test)|%c: %s|%s:%lu|%s / %s][OK]",
                     (char)drive_info.letter, drive_info.nickname,
                     drive_info.host, drive_info.port,
                     drive_info.transport == SIDETNFS_TRANSPORT_UDP ? "UDP" : "TCP",
                     drive_info.mount_path);
         } else if (drive_info.type == SIDETNFS_DRIVE_TYPE_SD) {
-            sprintf(msg, "[1][Slot 0 (not a network test)|%c: %s|SD|%s][OK]",
+            sprintf(msg, "[1][Slot 1 (not a network test)|%c: %s|SD|%s][OK]",
                     (char)drive_info.letter, drive_info.nickname, drive_info.sd_path);
         } else {
-            sprintf(msg, "[3][Slot 0|Unknown drive type %lu.][OK]", drive_info.type);
+            sprintf(msg, "[3][Slot 1|Unknown drive type %lu.][OK]", drive_info.type);
         }
         form_alert(1, msg);
         break;
-    case SIDETNFS_STATUS_EMPTY_SLOT:
-        form_alert(1, "[1][Slot 0|Firmware slot 0 is empty.][OK]");
-        break;
     default:
-        sprintf(msg, "[3][SideTNFS drive|Unexpected status %lu.][OK]", drive_info.status);
+        sprintf(msg, "[3][Slot 1|Unexpected drive state %lu.][OK]", drive_info.state);
         form_alert(1, msg);
         break;
     }
@@ -608,13 +675,22 @@ static void dialog_probe_firmware(void)
 /* several string lengths happen to match numerically today).           */
 /* ================================================================== */
 
-/* Caller must have already validated w->type is SD or TNFS -- an
- * unrecognized type is a load-time error, not something to silently
- * default to TNFS here. */
+/* Caller must have already validated w->type is SD or TNFS whenever
+ * w->state != EMPTY -- an unrecognized type on a configured slot is a
+ * load-time error, not something to silently default to TNFS here. */
 static void wire_to_ui_drive(const SideTnfsDriveInfo *w, Drive *d)
 {
     memset(d, 0, sizeof(*d));
-    d->used   = (int)w->used;
+
+    switch (w->state) {
+    case SIDETNFS_DRIVE_STATE_DISABLED: d->state = DRIVE_SLOT_DISABLED; break;
+    case SIDETNFS_DRIVE_STATE_ENABLED:  d->state = DRIVE_SLOT_ENABLED;  break;
+    case SIDETNFS_DRIVE_STATE_EMPTY:
+    default:                            d->state = DRIVE_SLOT_EMPTY;   break;
+    }
+    if (d->state == DRIVE_SLOT_EMPTY)
+        return; /* every other field stays zeroed -- meaningless when EMPTY */
+
     d->letter = (char)w->letter;
 
     if (w->type == SIDETNFS_DRIVE_TYPE_TNFS) {
@@ -638,11 +714,18 @@ static void wire_to_ui_drive(const SideTnfsDriveInfo *w, Drive *d)
 static void ui_to_wire_drive(const Drive *d, SideTnfsDriveInfo *w)
 {
     memset(w, 0, sizeof(*w));
-    w->used   = (unsigned long)(d->used ? 1 : 0);
+
+    switch (d->state) {
+    case DRIVE_SLOT_DISABLED: w->state = SIDETNFS_DRIVE_STATE_DISABLED; break;
+    case DRIVE_SLOT_ENABLED:  w->state = SIDETNFS_DRIVE_STATE_ENABLED;  break;
+    case DRIVE_SLOT_EMPTY:
+    default:                  w->state = SIDETNFS_DRIVE_STATE_EMPTY;   break;
+    }
+    if (d->state == DRIVE_SLOT_EMPTY)
+        return; /* every other field stays zeroed (memset above) */
+
     w->letter = (unsigned long)(unsigned char)d->letter;
-    w->type   = (d->type == DRIVE_TYPE_SD)   ? SIDETNFS_DRIVE_TYPE_SD
-              : (d->type == DRIVE_TYPE_TNFS) ? SIDETNFS_DRIVE_TYPE_TNFS
-                                              : SIDETNFS_DRIVE_TYPE_NONE;
+    w->type   = (d->type == DRIVE_TYPE_SD) ? SIDETNFS_DRIVE_TYPE_SD : SIDETNFS_DRIVE_TYPE_TNFS;
     w->transport = (d->transport == DRIVE_TRANSPORT_TCP) ? SIDETNFS_TRANSPORT_TCP : SIDETNFS_TRANSPORT_UDP;
     w->port      = (unsigned long)d->port;
 
@@ -663,24 +746,28 @@ static void ui_to_wire_drive(const Drive *d, SideTnfsDriveInfo *w)
 /* ================================================================== */
 
 /* Builds *out entirely from firmware: GET_CONFIG_INFO, then GET_DRIVE
- * for every ordinary slot. Returns 1 on a fully consistent read, 0 on
- * any timeout, unexpected status, or unrecognized field -- *out is left
- * untouched on failure (never partially filled). No alerts: this is the
- * silent building block for both the startup load and the post-Save
- * readback verification, which report failure differently. */
+ * for all eight FIXED ordinary slots, always -- EMPTY is a normal state
+ * (protocol v3), never a reason to skip a slot or stop early. Returns 1
+ * on a fully consistent read of all eight slots, 0 on any timeout,
+ * unexpected status/protocol version, or unrecognized field on a
+ * configured slot -- *out is left untouched on failure (never partially
+ * filled), so a communication problem partway through can never result
+ * in a partially-loaded configuration being used or saved. No alerts:
+ * this is the silent building block for both the startup load and the
+ * post-Save readback verification, which report failure differently. */
 static int fetch_drive_config_from_firmware(DriveConfig *out)
 {
     SideTnfsConfigInfo config_info;
     SideTnfsDriveInfo wire;
     DriveConfig built;
-    int i, n;
+    int i;
     char letter;
 
     if (sidetnfs_probe_get_config_info(&config_info) != SIDETNFS_PROBE_OK)
         return 0;
     if (config_info.status != SIDETNFS_STATUS_OK)
         return 0;
-    if (config_info.protocol_version != 2)
+    if (config_info.protocol_version != SIDETNFS_CONFIG_PROTOCOL_VERSION)
         return 0;
     if (config_info.max_drives != (unsigned long)MAX_ORDINARY_DRIVES)
         return 0;
@@ -690,60 +777,63 @@ static int fetch_drive_config_from_firmware(DriveConfig *out)
         return 0;
 
     memset(&built, 0, sizeof(built));
-    built.drives[0].used   = 1;
-    built.drives[0].letter = letter;
-    built.drives[0].type   = DRIVE_TYPE_CONFIG;
-    strncpy(built.drives[0].nickname, "Config disk", DRIVE_NICK_LEN - 1);
-    n = 1;
+    built.settings_letter = letter;
 
     for (i = 0; i < MAX_ORDINARY_DRIVES; i++) {
         if (sidetnfs_probe_get_drive((unsigned long)i, &wire) != SIDETNFS_PROBE_OK)
             return 0;
-        if (wire.status == SIDETNFS_STATUS_EMPTY_SLOT)
-            continue; /* no UI row for this slot */
         if (wire.status != SIDETNFS_STATUS_OK)
-            return 0;
-        if (wire.type != SIDETNFS_DRIVE_TYPE_SD && wire.type != SIDETNFS_DRIVE_TYPE_TNFS)
-            return 0; /* unknown/corrupt type -- never silently treated as TNFS */
-        if (n >= MAX_DRIVES)
-            return 0;
+            return 0; /* only an out-of-range index is ever non-OK now -- never sent here */
+        if (wire.state != SIDETNFS_DRIVE_STATE_EMPTY
+            && wire.type != SIDETNFS_DRIVE_TYPE_SD && wire.type != SIDETNFS_DRIVE_TYPE_TNFS)
+            return 0; /* unknown/corrupt type on a configured slot -- never silently treated as TNFS */
 
-        wire_to_ui_drive(&wire, &built.drives[n]);
-        n++;
+        wire_to_ui_drive(&wire, &built.drives[i]);
     }
 
-    built.drive_count = n;
-    drive_config_sort_by_letter(&built);
     *out = built;
     return 1;
 }
 
 /* Startup wrapper: distinguishes "no firmware at all" (silent, expected
- * offline case -- a plain GET_CONFIG_INFO timeout) from "firmware
- * present but its configuration is unusable" (visible alert, since that
- * is not the normal offline case). On success, *cfg is entirely
- * firmware-driven; on failure *cfg keeps whatever main.c initialized it
- * to (built-in defaults, no file involved either way). */
+ * offline case -- a plain GET_CONFIG_INFO timeout), "firmware speaks an
+ * unsupported protocol version" (a specific, visible mismatch -- see
+ * the report for why this must never silently fall back to old-protocol
+ * semantics), and "firmware present but its configuration is otherwise
+ * unusable" (visible alert, since that is not the normal offline case).
+ * On success, *cfg is entirely firmware-driven; on any failure *cfg
+ * keeps whatever main.c initialized it to (built-in defaults) and Save
+ * stays blocked (see dialog_run()'s firmware_backed). */
 static int dialog_startup_load(DriveConfig *cfg)
 {
     SideTnfsConfigInfo probe;
     DriveConfig fw_cfg;
+    char msg[100];
 
     if (sidetnfs_probe_get_config_info(&probe) != SIDETNFS_PROBE_OK)
         return 0; /* no firmware detected -- expected offline case, no alert */
+
+    if (probe.status == SIDETNFS_STATUS_OK && probe.protocol_version != SIDETNFS_CONFIG_PROTOCOL_VERSION) {
+        sprintf(msg, "[3][Unsupported SideTNFS configuration protocol|Firmware: %lu|Application: %lu][OK]",
+                probe.protocol_version, SIDETNFS_CONFIG_PROTOCOL_VERSION);
+        form_alert(1, msg);
+        return 0; /* Save stays blocked -- never write with mismatched semantics */
+    }
 
     if (fetch_drive_config_from_firmware(&fw_cfg)) {
         *cfg = fw_cfg;
         return 1;
     }
 
-    form_alert(1, "[3][SideTNFS firmware|Unexpected configuration.|Using local file instead.][OK]");
+    form_alert(1, "[3][SideTNFS firmware|Unexpected configuration.|Using built-in defaults.][OK]");
     return 0;
 }
 
 static int drives_match(const Drive *a, const Drive *b)
 {
-    if (a->used != b->used) return 0;
+    if (a->state != b->state) return 0;
+    if (a->state == DRIVE_SLOT_EMPTY) return 1; /* other fields are meaningless when EMPTY */
+
     if (a->letter != b->letter) return 0;
     if (a->type != b->type) return 0;
     if (strcmp(a->nickname, b->nickname) != 0) return 0;
@@ -758,84 +848,82 @@ static int drives_match(const Drive *a, const Drive *b)
     case DRIVE_TYPE_SD:
         if (strcmp(a->sd_path, b->sd_path) != 0) return 0;
         break;
-    case DRIVE_TYPE_CONFIG:
     default:
         break;
     }
     return 1;
 }
 
-/* Both configs must already be sorted by letter (drive_config_sort_by_letter
- * guarantees this for both the live UI list and fetch_drive_config_from_firmware's
- * output), so an index-by-index comparison after equal drive_count is valid. */
+/* Slots are fixed-position (never compacted/sorted), so a direct
+ * index-by-index comparison is always valid -- no drive_count/sort
+ * precondition needed anymore. */
 static int drive_config_matches(const DriveConfig *a, const DriveConfig *b)
 {
     int i;
-    if (a->drive_count != b->drive_count) return 0;
-    for (i = 0; i < a->drive_count; i++)
+    if (a->settings_letter != b->settings_letter) return 0;
+    for (i = 0; i < MAX_DRIVES; i++)
         if (!drives_match(&a->drives[i], &b->drives[i]))
             return 0;
     return 1;
 }
 
-/* Fase AC-4: full firmware-backed Save. DELETE_DRIVE for all 8 ordinary
- * slots first (so letter swaps never hit a temporary duplicate), then
- * SET_CONFIG_DRIVE, one SET_DRIVE per used ordinary UI drive, then
- * exactly one SAVE_CONFIG, then a full readback + compare. Returns 1
- * only after the readback matches exactly; msg is always filled in on
- * failure. Never calls SAVE_CONFIG if an earlier step failed -- flash is
- * only ever touched by that one call. */
+/* Fase 12B/AtariConfig-3: full firmware-backed Save. DELETE_DRIVE (==
+ * SET_DRIVE state=EMPTY) for all 8 fixed slots first (so letter swaps
+ * never hit a temporary duplicate -- a DISABLED slot reserves its
+ * letter just as much as an ENABLED one), then SET_CONFIG_DRIVE for the
+ * SETTINGS letter, then one SET_DRIVE per non-EMPTY slot with its exact
+ * index and current state, then exactly one SAVE_CONFIG, then a full
+ * readback + compare. Returns 1 only after the readback matches
+ * exactly; msg is always filled in on failure. Never calls SAVE_CONFIG
+ * if an earlier step failed -- flash is only ever touched by that one
+ * call. No "too many drives" check needed anymore: the array is fixed
+ * at exactly MAX_ORDINARY_DRIVES slots, so that failure mode is now
+ * structurally impossible. */
 static int save_to_firmware(const DriveConfig *cfg, char *msg)
 {
     unsigned long status;
-    int i, slot, config_idx;
-    unsigned long config_letter;
+    int i;
     DriveConfig readback;
 
     for (i = 0; i < MAX_ORDINARY_DRIVES; i++) {
         if (sidetnfs_probe_delete_drive((unsigned long)i, &status) != SIDETNFS_PROBE_OK) {
-            sprintf(msg, "[3][Save to firmware failed|DELETE_DRIVE(%d) timed out.|Nothing was saved.][OK]", i);
+            sprintf(msg, "[3][Save to firmware failed|DELETE_DRIVE(slot %d) timed out.|Nothing was saved.][OK]", i + 1);
             return 0;
         }
         if (status != SIDETNFS_STATUS_OK && status != SIDETNFS_STATUS_EMPTY_SLOT) {
-            sprintf(msg, "[3][Save to firmware failed|DELETE_DRIVE(%d): status %lu.|Nothing was saved.][OK]", i, status);
+            sprintf(msg, "[3][Save to firmware failed|DELETE_DRIVE(slot %d): %s|Nothing was saved.][OK]",
+                    i + 1, sidetnfs_drive_status_text(status));
             return 0;
         }
     }
 
-    config_idx = drive_config_config_index(cfg);
-    config_letter = (config_idx >= 0) ? (unsigned long)(unsigned char)cfg->drives[config_idx].letter : 0UL;
-    if (sidetnfs_probe_set_config_drive(config_letter, &status) != SIDETNFS_PROBE_OK) {
+    if (sidetnfs_probe_set_config_drive((unsigned long)(unsigned char)cfg->settings_letter, &status) != SIDETNFS_PROBE_OK) {
         sprintf(msg, "[3][Save to firmware failed|SET_CONFIG_DRIVE timed out.|Nothing was saved.][OK]");
         return 0;
     }
     if (status != SIDETNFS_STATUS_OK) {
-        sprintf(msg, "[3][Save to firmware failed|SET_CONFIG_DRIVE: status %lu.|Nothing was saved.][OK]", status);
+        sprintf(msg, "[3][Save to firmware failed|SETTINGS letter: %s|Nothing was saved.][OK]",
+                sidetnfs_drive_status_text(status));
         return 0;
     }
 
-    slot = 0;
-    for (i = 0; i < cfg->drive_count; i++) {
+    for (i = 0; i < MAX_ORDINARY_DRIVES; i++) {
         SideTnfsDriveInfo wire;
         const Drive *d = &cfg->drives[i];
 
-        if (d->type == DRIVE_TYPE_CONFIG)
-            continue;
-        if (slot >= MAX_ORDINARY_DRIVES) {
-            sprintf(msg, "[3][Save to firmware failed|Too many drives.|Nothing was saved.][OK]");
-            return 0;
-        }
+        if (drive_slot_is_empty(d))
+            continue; /* already cleared by the DELETE_DRIVE loop above */
 
         ui_to_wire_drive(d, &wire);
-        if (sidetnfs_probe_set_drive((unsigned long)slot, &wire, &status) != SIDETNFS_PROBE_OK) {
-            sprintf(msg, "[3][Save to firmware failed|SET_DRIVE(%d) timed out.|Nothing was saved.][OK]", slot);
+        if (sidetnfs_probe_set_drive((unsigned long)i, &wire, &status) != SIDETNFS_PROBE_OK) {
+            sprintf(msg, "[3][Save to firmware failed|SET_DRIVE(slot %d) timed out.|Nothing was saved.][OK]", i + 1);
             return 0;
         }
         if (status != SIDETNFS_STATUS_OK) {
-            sprintf(msg, "[3][Save to firmware failed|Drive %c: status %lu.|Nothing was saved.][OK]", d->letter, status);
+            sprintf(msg, "[3][Save to firmware failed|Slot %d (%c:): %s|Nothing was saved.][OK]",
+                    i + 1, d->letter, sidetnfs_drive_status_text(status));
             return 0;
         }
-        slot++;
     }
 
     if (sidetnfs_probe_save_config(&status) != SIDETNFS_PROBE_OK) {
@@ -843,7 +931,7 @@ static int save_to_firmware(const DriveConfig *cfg, char *msg)
         return 0;
     }
     if (status != SIDETNFS_STATUS_OK) {
-        sprintf(msg, "[3][Save to firmware failed|SAVE_CONFIG: status %lu.][OK]", status);
+        sprintf(msg, "[3][Save to firmware failed|SAVE_CONFIG: %s][OK]", sidetnfs_drive_status_text(status));
         return 0;
     }
 
@@ -1227,9 +1315,10 @@ static void rtc_startup_load(void)
 }
 
 /* ================================================================== */
-/* Config-drive-letter editor                                          */
+/* SETTINGS disk letter editor                                         */
 /* Only the drive letter is editable; nickname/type are fixed context. */
-/* No Test, no Delete -- the config drive can never be removed.        */
+/* No Test, no Delete/Remove -- the SETTINGS disk always exists and is  */
+/* never one of the eight ordinary slots (drive.h).                     */
 /* ================================================================== */
 
 static void cl_dialog_init(void)
@@ -1265,7 +1354,7 @@ static void cl_dialog_init(void)
     cl_dlg[CL_ROOT].ob_spec.index = 0x00031070L;
 
     set_obj(cl_dlg, CL_TITLE, G_STRING, NONE, NORMAL, 10*cw, yt, 20*cw, rh);
-    cl_dlg[CL_TITLE].ob_spec.free_string = "Config Drive Letter";
+    cl_dlg[CL_TITLE].ob_spec.free_string = "SETTINGS Disk Letter";
 
     set_obj(cl_dlg, CL_DIV1, G_BOX, NONE, NORMAL, cw, ydiv1, DW - 2*cw, 2);
     cl_dlg[CL_DIV1].ob_spec.index = 0x00001171L;
@@ -1273,12 +1362,12 @@ static void cl_dialog_init(void)
     set_obj(cl_dlg, CL_LBL_NICK, G_STRING, NONE, NORMAL, xl, ynick, 11*cw, rh);
     cl_dlg[CL_LBL_NICK].ob_spec.free_string = "Nickname:";
     set_obj(cl_dlg, CL_VAL_NICK, G_STRING, NONE, NORMAL, xf, ynick, 23*cw, rh);
-    cl_dlg[CL_VAL_NICK].ob_spec.free_string = "Config disk";
+    cl_dlg[CL_VAL_NICK].ob_spec.free_string = "SETTINGS disk";
 
     set_obj(cl_dlg, CL_LBL_TYPE, G_STRING, NONE, NORMAL, xl, ytype, 11*cw, rh);
     cl_dlg[CL_LBL_TYPE].ob_spec.free_string = "Type:";
     set_obj(cl_dlg, CL_VAL_TYPE, G_STRING, NONE, NORMAL, xf, ytype, 10*cw, rh);
-    cl_dlg[CL_VAL_TYPE].ob_spec.free_string = "CONFIG";
+    cl_dlg[CL_VAL_TYPE].ob_spec.free_string = "SETTINGS";
 
     set_obj(cl_dlg, CL_LBL_DRIVE, G_STRING, NONE, NORMAL, xl, ydrv, 11*cw, rh);
     cl_dlg[CL_LBL_DRIVE].ob_spec.free_string = "Drive:";
@@ -1299,21 +1388,24 @@ static void cl_dialog_init(void)
     (void)sx; (void)sy; (void)sw; (void)bw; (void)bh;
 }
 
-/* Applies the new letter to cfg->drives[index] on OK; leaves it
- * untouched on Cancel. */
-static void cl_editor_run(DriveConfig *cfg, int index)
+/* Applies the new letter to cfg->settings_letter on OK; leaves it
+ * untouched on Cancel. Validates against the eight ordinary slots only,
+ * scanning for the specific conflicting slot number to report -- never
+ * against cfg->settings_letter itself, which would always "conflict"
+ * with its own current value. */
+static void cl_editor_run(DriveConfig *cfg)
 {
     short x, y, w, h;
     short which;
     int done;
-    Drive *d = &cfg->drives[index];
     char msg[100];
     char newletter;
     char drv[2];
+    int i;
 
     cl_dialog_init();
 
-    drv[0] = d->letter; drv[1] = '\0';
+    drv[0] = cfg->settings_letter; drv[1] = '\0';
     set_buf(buf_te_drive, TE_BUF_DRV, drv);
 
     form_center(cl_dlg, &x, &y, &w, &h);
@@ -1329,12 +1421,19 @@ static void cl_editor_run(DriveConfig *cfg, int index)
         case CL_OK:
             newletter = buf_te_drive[0];
             if (newletter >= 'a' && newletter <= 'z') newletter = (char)(newletter - 'a' + 'A');
-            if (!drive_config_letter_valid(cfg, newletter, index)) {
-                sprintf(msg, "[3][Validation error|Drive %c: invalid or already used.][OK]", newletter);
+            if (newletter < 'A' || newletter > 'Z' || newletter == 'A' || newletter == 'B') {
+                sprintf(msg, "[3][Validation error|Drive %c: invalid letter.][OK]", newletter);
                 form_alert(1, msg);
                 break;
             }
-            d->letter = newletter;
+            for (i = 0; i < MAX_DRIVES && !(drive_slot_is_configured(&cfg->drives[i]) && cfg->drives[i].letter == newletter); i++)
+                ;
+            if (i < MAX_DRIVES) {
+                sprintf(msg, "[3][Validation error|Drive letter %c: is already used|by slot %d.][OK]", newletter, i + 1);
+                form_alert(1, msg);
+                break;
+            }
+            cfg->settings_letter = newletter;
             done = 1;
             break;
         case CL_CANCEL:
@@ -1357,7 +1456,7 @@ static void sd_dialog_init(int show_delete)
     short sx, sy, sw, sh;
     int rh, tm, pitch;
     int DW, DH, xl, xf;
-    int yt, ydiv1, ydrv, ynick, ypath, ydiv2, ybtn;
+    int yt, ydiv1, ydrv, ynick, ypath, yactive, ydiv2, ybtn;
 
     graf_handle(&cw, &ch, &bw, &bh);
     wind_get(0, WF_WORKXYWH, &sx, &sy, &sw, &sh);
@@ -1371,14 +1470,15 @@ static void sd_dialog_init(int show_delete)
     xl = 2 * cw;
     xf = 13 * cw;
 
-    yt    = tm;
-    ydiv1 = yt + rh + 1;
-    ydrv  = ydiv1 + 5;
-    ynick = ydrv + pitch;
-    ypath = ynick + pitch;
-    ydiv2 = ypath + rh + 2;
-    ybtn  = ydiv2 + 7;
-    DH    = ybtn + rh + tm + 3;
+    yt      = tm;
+    ydiv1   = yt + rh + 1;
+    ydrv    = ydiv1 + 5;
+    ynick   = ydrv + pitch;
+    ypath   = ynick + pitch;
+    yactive = ypath + pitch;
+    ydiv2   = yactive + rh + 2;
+    ybtn    = ydiv2 + 7;
+    DH      = ybtn + rh + tm + 3;
 
     set_obj(sd_dlg, SD_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
     sd_dlg[SD_ROOT].ob_spec.index = 0x00031070L;
@@ -1404,12 +1504,17 @@ static void sd_dialog_init(int show_delete)
     set_obj(sd_dlg, SD_PATH_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, ypath, 31*cw, rh);
     sd_dlg[SD_PATH_EDIT].ob_spec.tedinfo = &ti_sd_path;
 
+    set_obj(sd_dlg, SD_LBL_ACTIVE, G_STRING, NONE, NORMAL, xl, yactive, 11*cw, rh);
+    sd_dlg[SD_LBL_ACTIVE].ob_spec.free_string = "Status:";
+    set_obj(sd_dlg, SD_ACTIVE_BTN, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, xf, yactive, 10*cw, rh);
+    sd_dlg[SD_ACTIVE_BTN].ob_spec.free_string = buf_drive_active;
+
     set_obj(sd_dlg, SD_DIV2, G_BOX, NONE, NORMAL, cw, ydiv2, DW - 2*cw, 2);
     sd_dlg[SD_DIV2].ob_spec.index = 0x00001171L;
 
     set_obj(sd_dlg, SD_DELETE, G_BUTTON, EXIT | TOUCHEXIT, show_delete ? NORMAL : DISABLED,
             4*cw, ybtn, 9*cw, rh);
-    sd_dlg[SD_DELETE].ob_spec.free_string = " Delete  ";
+    sd_dlg[SD_DELETE].ob_spec.free_string = " Remove  ";
 
     set_obj(sd_dlg, SD_OK, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, 17*cw, ybtn, 8*cw, rh);
     sd_dlg[SD_OK].ob_spec.free_string = "   OK   ";
@@ -1422,13 +1527,18 @@ static void sd_dialog_init(int show_delete)
     (void)sx; (void)sy; (void)sw; (void)bw; (void)bh;
 }
 
-static void sd_load_from_drive(const Drive *d)
+static void sd_load_from_drive(const Drive *d, int is_new)
 {
     char drv[2];
-    drv[0] = d->letter; drv[1] = '\0';
+    drv[0] = d->letter; drv[1] = '\0'; /* already set by the caller, either from drive_config_suggest_letter() or the existing record */
     set_buf(buf_te_drive, TE_BUF_DRV, drv);
     set_buf(buf_te_nick,  TE_BUF_NICK, d->nickname);
     set_buf(buf_sd_path,  TE_BUF_SDPATH, d->sd_path);
+
+    /* A new (EMPTY) slot defaults to Active/ENABLED unless the user
+     * explicitly toggles it off before OK -- see the report. */
+    drive_editor_enabled = is_new ? 1 : (d->state == DRIVE_SLOT_ENABLED);
+    update_drive_active_button_text();
 }
 
 static void sd_save_to_drive(Drive *d)
@@ -1438,24 +1548,25 @@ static void sd_save_to_drive(Drive *d)
     d->letter = c;
     buf_copy(buf_te_nick, d->nickname, DRIVE_NICK_LEN);
     buf_copy(buf_sd_path, d->sd_path, DRIVE_SDPATH_LEN);
-    d->type = DRIVE_TYPE_SD;
-    d->used = 1;
+    d->type  = DRIVE_TYPE_SD;
+    d->state = drive_editor_enabled ? DRIVE_SLOT_ENABLED : DRIVE_SLOT_DISABLED;
 }
 
-/* Returns 2 if the drive was deleted, 1 if added/modified, 0 if
- * cancelled without changes. index < 0 means "add new". */
+/* Returns 2 if the drive was removed (cleared to EMPTY), 1 if
+ * added/modified, 0 if cancelled without changes. index is always a
+ * valid fixed slot 0..MAX_DRIVES-1 -- "add" now means editing a slot
+ * that is currently EMPTY, not appending to a compacted list. */
 static int sd_editor_run(DriveConfig *cfg, int index)
 {
     short x, y, w, h;
     short which;
     int done;
-    int is_new = (index < 0);
+    int is_new = drive_slot_is_empty(&cfg->drives[index]);
     Drive working;
     char msg[100];
 
     if (is_new) {
         memset(&working, 0, sizeof(working));
-        working.used   = 1;
         working.type   = DRIVE_TYPE_SD;
         working.letter = drive_config_suggest_letter(cfg);
     } else {
@@ -1463,7 +1574,7 @@ static int sd_editor_run(DriveConfig *cfg, int index)
     }
 
     sd_dialog_init(!is_new);
-    sd_load_from_drive(&working);
+    sd_load_from_drive(&working, is_new);
 
     form_center(sd_dlg, &x, &y, &w, &h);
     form_dial(FMD_START, x, y, w, h, x, y, w, h);
@@ -1475,9 +1586,15 @@ static int sd_editor_run(DriveConfig *cfg, int index)
         wait_mouse_release();
 
         switch (which) {
+        case SD_ACTIVE_BTN:
+            drive_editor_enabled = !drive_editor_enabled;
+            update_drive_active_button_text();
+            objc_draw(sd_dlg, SD_ROOT, MAX_DEPTH, x, y, w, h);
+            break;
+
         case SD_DELETE:
             if (!is_new) {
-                if (form_alert(1, "[2][Delete this drive?][Delete|Cancel]") == 1)
+                if (form_alert(1, "[2][Remove this drive configuration?][Remove|Cancel]") == 1)
                     done = 2;
             }
             break;
@@ -1488,8 +1605,7 @@ static int sd_editor_run(DriveConfig *cfg, int index)
                 form_alert(1, msg);
                 break;
             }
-            if (is_new) cfg->drives[cfg->drive_count++] = working;
-            else        cfg->drives[index] = working;
+            cfg->drives[index] = working;
             done = 1;
             break;
 
@@ -1502,7 +1618,10 @@ static int sd_editor_run(DriveConfig *cfg, int index)
 
     form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
 
-    if (done == 2) return 2;
+    if (done == 2) {
+        memset(&cfg->drives[index], 0, sizeof(cfg->drives[index])); /* state == DRIVE_SLOT_EMPTY */
+        return 2;
+    }
     if (done == 1) return 1;
     return 0;
 }
@@ -1517,7 +1636,7 @@ static void te_dialog_init(int show_delete)
     short sx, sy, sw, sh;
     int rh, tm, pitch;
     int DW, DH, xl, xf;
-    int yt, ydiv1, ydrv, ynick, yhost, yport, ytrans, ymount, ymounthint, ydiv2, ybtn;
+    int yt, ydiv1, ydrv, ynick, yhost, yport, ytrans, ymount, ymounthint, yactive, ydiv2, ybtn;
 
     graf_handle(&cw, &ch, &bw, &bh);
     wind_get(0, WF_WORKXYWH, &sx, &sy, &sw, &sh);
@@ -1540,7 +1659,8 @@ static void te_dialog_init(int show_delete)
     ytrans     = yport + pitch;
     ymount     = ytrans + pitch;
     ymounthint = ymount + pitch;
-    ydiv2      = ymounthint + rh + 2;
+    yactive    = ymounthint + pitch;
+    ydiv2      = yactive + rh + 2;
     ybtn       = ydiv2 + 7;
     DH         = ybtn + rh + tm + 3;
 
@@ -1593,6 +1713,11 @@ static void te_dialog_init(int show_delete)
     set_obj(te_dlg, TE_MOUNT_HINT, G_STRING, NONE, NORMAL, xf, ymounthint, 30*cw, rh);
     te_dlg[TE_MOUNT_HINT].ob_spec.free_string = "empty = server root";
 
+    set_obj(te_dlg, TE_LBL_ACTIVE, G_STRING, NONE, NORMAL, xl, yactive, 11*cw, rh);
+    te_dlg[TE_LBL_ACTIVE].ob_spec.free_string = "Status:";
+    set_obj(te_dlg, TE_ACTIVE_BTN, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, xf, yactive, 10*cw, rh);
+    te_dlg[TE_ACTIVE_BTN].ob_spec.free_string = buf_drive_active;
+
     set_obj(te_dlg, TE_DIV2, G_BOX, NONE, NORMAL, cw, ydiv2, DW - 2*cw, 2);
     te_dlg[TE_DIV2].ob_spec.index = 0x00001171L;
 
@@ -1601,7 +1726,7 @@ static void te_dialog_init(int show_delete)
 
     set_obj(te_dlg, TE_DELETE, G_BUTTON, EXIT | TOUCHEXIT, show_delete ? NORMAL : DISABLED,
             13*cw, ybtn, 9*cw, rh);
-    te_dlg[TE_DELETE].ob_spec.free_string = " Delete  ";
+    te_dlg[TE_DELETE].ob_spec.free_string = " Remove  ";
 
     set_obj(te_dlg, TE_OK, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, 25*cw, ybtn, 8*cw, rh);
     te_dlg[TE_OK].ob_spec.free_string = "   OK   ";
@@ -1614,7 +1739,7 @@ static void te_dialog_init(int show_delete)
     (void)sx; (void)sy; (void)sw; (void)bw; (void)bh;
 }
 
-static void te_load_from_drive(const Drive *d)
+static void te_load_from_drive(const Drive *d, int is_new)
 {
     char drv[2];
     char port_str[TE_BUF_PORT];
@@ -1626,6 +1751,11 @@ static void te_load_from_drive(const Drive *d)
     sprintf(port_str, "%d", d->port);
     set_buf(buf_te_port,  TE_BUF_PORT, port_str);
     set_buf(buf_te_mount, TE_BUF_MOUNT, d->mount_path);
+
+    /* A new (EMPTY) slot defaults to Active/ENABLED unless the user
+     * explicitly toggles it off before OK -- see the report. */
+    drive_editor_enabled = is_new ? 1 : (d->state == DRIVE_SLOT_ENABLED);
+    update_drive_active_button_text();
 }
 
 static void te_save_to_drive(Drive *d)
@@ -1649,24 +1779,25 @@ static void te_save_to_drive(Drive *d)
 
     d->port = atoi(buf_te_port); /* range-checked by validate_drive() */
     d->transport = DRIVE_TRANSPORT_UDP; /* TCP button is DISABLED: never settable this phase */
-    d->type = DRIVE_TYPE_TNFS;
-    d->used = 1;
+    d->type  = DRIVE_TYPE_TNFS;
+    d->state = drive_editor_enabled ? DRIVE_SLOT_ENABLED : DRIVE_SLOT_DISABLED;
 }
 
-/* Returns 2 if the drive was deleted, 1 if added/modified, 0 if
- * cancelled without changes. index < 0 means "add new". */
+/* Returns 2 if the drive was removed (cleared to EMPTY), 1 if
+ * added/modified, 0 if cancelled without changes. index is always a
+ * valid fixed slot 0..MAX_DRIVES-1 -- "add" now means editing a slot
+ * that is currently EMPTY, not appending to a compacted list. */
 static int tnfs_editor_run(DriveConfig *cfg, int index)
 {
     short x, y, w, h;
     short which;
     int done;
-    int is_new = (index < 0);
+    int is_new = drive_slot_is_empty(&cfg->drives[index]);
     Drive working;
     char msg[220];
 
     if (is_new) {
         memset(&working, 0, sizeof(working));
-        working.used      = 1;
         working.type      = DRIVE_TYPE_TNFS;
         working.letter    = drive_config_suggest_letter(cfg);
         working.transport = DRIVE_TRANSPORT_UDP;
@@ -1678,7 +1809,7 @@ static int tnfs_editor_run(DriveConfig *cfg, int index)
     }
 
     te_dialog_init(!is_new);
-    te_load_from_drive(&working);
+    te_load_from_drive(&working, is_new);
 
     form_center(te_dlg, &x, &y, &w, &h);
     form_dial(FMD_START, x, y, w, h, x, y, w, h);
@@ -1702,9 +1833,15 @@ static int tnfs_editor_run(DriveConfig *cfg, int index)
             objc_draw(te_dlg, TE_TEST, MAX_DEPTH, x, y, w, h);
             break;
 
+        case TE_ACTIVE_BTN:
+            drive_editor_enabled = !drive_editor_enabled;
+            update_drive_active_button_text();
+            objc_draw(te_dlg, TE_ROOT, MAX_DEPTH, x, y, w, h);
+            break;
+
         case TE_DELETE:
             if (!is_new) {
-                if (form_alert(1, "[2][Delete this drive?][Delete|Cancel]") == 1)
+                if (form_alert(1, "[2][Remove this drive configuration?][Remove|Cancel]") == 1)
                     done = 2;
             }
             break;
@@ -1715,8 +1852,7 @@ static int tnfs_editor_run(DriveConfig *cfg, int index)
                 form_alert(1, msg);
                 break;
             }
-            if (is_new) cfg->drives[cfg->drive_count++] = working;
-            else        cfg->drives[index] = working;
+            cfg->drives[index] = working;
             done = 1;
             break;
 
@@ -1729,7 +1865,10 @@ static int tnfs_editor_run(DriveConfig *cfg, int index)
 
     form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
 
-    if (done == 2) return 2;
+    if (done == 2) {
+        memset(&cfg->drives[index], 0, sizeof(cfg->drives[index])); /* state == DRIVE_SLOT_EMPTY */
+        return 2;
+    }
     if (done == 1) return 1;
     return 0;
 }
@@ -2366,7 +2505,7 @@ static void ov_dialog_init(void)
     short sx, sy, sw, sh;
     int rh, tm, row_pitch;
     int DW, DH;
-    int yt, ydiv1, yrow0, ydiv2, ybtn;
+    int yt, ydiv1, ysettings, ydiv2, yrow0, ydiv3, ybtn;
     int i;
 
     graf_handle(&cw, &ch, &bw, &bh);
@@ -2377,40 +2516,49 @@ static void ov_dialog_init(void)
     tm        = (rh / 4 > 2) ? rh / 4 : 2;
     row_pitch = rh + 2;
 
-    DW    = 46 * cw;
-    yt    = tm;
-    ydiv1 = yt + rh + 1;
-    yrow0 = ydiv1 + 5;
-    ydiv2 = yrow0 + MAX_DRIVES * row_pitch + 2;
-    ybtn  = ydiv2 + 7;
-    DH    = ybtn + rh + tm + 3;
+    DW        = 48 * cw;
+    yt        = tm;
+    ydiv1     = yt + rh + 1;
+    ysettings = ydiv1 + 5;
+    ydiv2     = ysettings + rh + 2;
+    yrow0     = ydiv2 + 5;
+    ydiv3     = yrow0 + MAX_DRIVES * row_pitch + 2;
+    ybtn      = ydiv3 + 7;
+    DH        = ybtn + rh + tm + 3;
 
     set_obj(ov_dlg, OV_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
     ov_dlg[OV_ROOT].ob_spec.index = 0x00031070L;
 
-    set_obj(ov_dlg, OV_TITLE, G_STRING, NONE, NORMAL, 13*cw, yt, 20*cw, rh);
+    set_obj(ov_dlg, OV_TITLE, G_STRING, NONE, NORMAL, 14*cw, yt, 20*cw, rh);
     ov_dlg[OV_TITLE].ob_spec.free_string = "SideTNFS Drives";
 
     set_obj(ov_dlg, OV_DIV1, G_BOX, NONE, NORMAL, cw, ydiv1, DW - 2*cw, 2);
     ov_dlg[OV_DIV1].ob_spec.index = 0x00001171L;
 
-    for (i = 0; i < MAX_DRIVES; i++) {
-        int ry = yrow0 + i * row_pitch;
-
-        set_obj(ov_dlg, OV_ROW_TEXT(i), G_STRING, NONE, NORMAL, cw, ry, 32*cw, rh);
-        ov_dlg[OV_ROW_TEXT(i)].ob_spec.free_string = ov_row_text[i];
-
-        set_obj(ov_dlg, OV_ROW_EDIT(i), G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 34*cw, ry, 8*cw, rh);
-        ov_dlg[OV_ROW_EDIT(i)].ob_spec.free_string = " Edit ";
-    }
+    set_obj(ov_dlg, OV_LBL_SETTINGS, G_STRING, NONE, NORMAL, cw, ysettings, 14*cw, rh);
+    ov_dlg[OV_LBL_SETTINGS].ob_spec.free_string = "SETTINGS disk:";
+    set_obj(ov_dlg, OV_SETTINGS_VAL, G_STRING, NONE, NORMAL, 15*cw, ysettings, 20*cw, rh);
+    ov_dlg[OV_SETTINGS_VAL].ob_spec.free_string = ov_settings_val;
+    set_obj(ov_dlg, OV_SETTINGS_BTN, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 36*cw, ysettings, 8*cw, rh);
+    ov_dlg[OV_SETTINGS_BTN].ob_spec.free_string = " Edit ";
 
     set_obj(ov_dlg, OV_DIV2, G_BOX, NONE, NORMAL, cw, ydiv2, DW - 2*cw, 2);
     ov_dlg[OV_DIV2].ob_spec.index = 0x00001171L;
 
-    set_obj(ov_dlg, OV_ADD, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 4*cw, ybtn, 10*cw, rh);
-    ov_dlg[OV_ADD].ob_spec.free_string = "Add disk";
+    for (i = 0; i < MAX_DRIVES; i++) {
+        int ry = yrow0 + i * row_pitch;
 
-    set_obj(ov_dlg, OV_OK, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, 18*cw, ybtn, 8*cw, rh);
+        set_obj(ov_dlg, OV_ROW_TEXT(i), G_STRING, NONE, NORMAL, cw, ry, 34*cw, rh);
+        ov_dlg[OV_ROW_TEXT(i)].ob_spec.free_string = ov_row_text[i];
+
+        set_obj(ov_dlg, OV_ROW_BTN(i), G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 36*cw, ry, 8*cw, rh);
+        ov_dlg[OV_ROW_BTN(i)].ob_spec.free_string = "  Add   ";
+    }
+
+    set_obj(ov_dlg, OV_DIV3, G_BOX, NONE, NORMAL, cw, ydiv3, DW - 2*cw, 2);
+    ov_dlg[OV_DIV3].ob_spec.index = 0x00001171L;
+
+    set_obj(ov_dlg, OV_OK, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, 19*cw, ybtn, 8*cw, rh);
     ov_dlg[OV_OK].ob_spec.free_string = "   OK   ";
 
     set_obj(ov_dlg, OV_CANCEL, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 30*cw, ybtn, 8*cw, rh);
@@ -2421,18 +2569,28 @@ static void ov_dialog_init(void)
     (void)sx; (void)sy; (void)sw; (void)bw; (void)bh;
 }
 
+/* Eight fixed rows, always -- an EMPTY slot shows only its slot number
+ * ("Empty", no stale letter/type/nickname left visible) and an "Add"
+ * button; a configured slot shows slot/state/letter/type/nickname and
+ * an "Edit" button. Never reordered. */
 static void ov_refresh_rows(const DriveConfig *cfg)
 {
     int i;
+
+    sprintf(ov_settings_val, "%c:", cfg->settings_letter);
+
     for (i = 0; i < MAX_DRIVES; i++) {
-        if (i < cfg->drive_count) {
-            sprintf(ov_row_text[i], "%c:  %-20.20s%s",
-                    cfg->drives[i].letter, cfg->drives[i].nickname,
-                    drive_type_name(cfg->drives[i].type));
-            ov_dlg[OV_ROW_EDIT(i)].ob_state &= (unsigned short)(~DISABLED);
+        const Drive *d = &cfg->drives[i];
+
+        if (drive_slot_is_empty(d)) {
+            sprintf(ov_row_text[i], "%d  Empty", i + 1);
+            ov_dlg[OV_ROW_BTN(i)].ob_spec.free_string = "  Add   ";
         } else {
-            ov_row_text[i][0] = '\0';
-            ov_dlg[OV_ROW_EDIT(i)].ob_state |= (unsigned short)DISABLED;
+            const char *state_word  = drive_slot_is_enabled(d) ? "Active" : "Inactive";
+            const char *type_abbrev = (d->type == DRIVE_TYPE_TNFS) ? "TNFS" : "SD";
+            sprintf(ov_row_text[i], "%d  %-8s %c:  %-4s %-20.20s",
+                    i + 1, state_word, d->letter, type_abbrev, d->nickname);
+            ov_dlg[OV_ROW_BTN(i)].ob_spec.free_string = "  Edit  ";
         }
     }
 }
@@ -2455,6 +2613,71 @@ static long atari_do_reset(void)
     return 0; /* unreached */
 }
 
+/* Fase 9B: explicit, testable restart decision. Every block below is
+ * proven -- not assumed -- to only take effect after a genuine restart:
+ * sidetnfs_config_save()'s own doc comment ("writing flash alone never
+ * changes the currently active TNFS session/drive letter/open
+ * handles/DTAs; a reboot is required for that"), and the network/RTC
+ * SAVE handlers' equivalent comments ("never touches WiFi/NTP/reboots
+ * -- the new configuration only takes effect on the next normal Pico
+ * boot"). No field within any one block is live-applied, so block-level
+ * "did it actually change" is sufficient -- nothing more granular is
+ * needed, and nothing here is a guess. */
+static int configuration_changes_require_restart(int drives_changed, int network_changed, int rtc_changed)
+{
+    return drives_changed || network_changed || rtc_changed;
+}
+
+/* Fase 9B: ~150ms after its ACK, the Pico itself starts rebooting (see
+ * sidetnfs_probe_reboot_pico()'s own comment) -- this is a fixed,
+ * bounded wait for that to actually happen before the Atari resets too,
+ * not a busy-loop: Vsync() blocks until the next vertical blank, same
+ * convention as every other bounded wait in this program
+ * (PAL_VBLS_PER_SEC, sidetnfs_probe.c). 15 VBLs is ~300ms at 50Hz
+ * (PAL) and ~250ms at 60Hz (NTSC) -- within the requested 200-300ms
+ * margin either way. */
+#define REBOOT_PICO_SETTLE_VBLS 15
+
+/* Fase 9B: runs after a fully successful Save (drives, and network/RTC
+ * if changed) -- baselines are already updated at this point regardless
+ * of what the user chooses here (see perform_save()), so Later can
+ * never leave the dirty-state/Quit-warning out of sync with what was
+ * actually persisted. Never calls any SAVE/SET command itself -- only
+ * sidetnfs_probe_reboot_pico(), at most once. */
+static void offer_restart_if_needed(int restart_required)
+{
+    if (!restart_required) {
+        form_alert(1, "[1][Settings saved.][OK]");
+        return;
+    }
+
+    /* Later is the safe default (button 2) even though Restart is
+     * listed first, per the report -- accidentally hitting Return must
+     * never trigger an unattended Pico reboot + Atari reset. */
+    if (form_alert(2, "[1][Settings saved.|Restart SideTNFS and Atari|"
+                      "to apply the changes?][Restart|Later]") == 1) {
+        int i;
+
+        if (sidetnfs_probe_reboot_pico() != SIDETNFS_PROBE_OK) {
+            /* Timeout covers both "no firmware response" and "firmware
+             * too old to recognize REBOOT_PICO" -- either way, no ACK
+             * was ever seen, so the Atari must not reset: nothing on
+             * the Pico side is known to be restarting. */
+            form_alert(1, "[3][Restart failed|(no response from SideTNFS).|"
+                          "Settings are saved and will become|"
+                          "active after a manual restart.][OK]");
+            return;
+        }
+
+        for (i = 0; i < REBOOT_PICO_SETTLE_VBLS; i++)
+            Vsync();
+        Supexec(atari_do_reset);
+    } else {
+        form_alert(1, "[1][Settings saved.|They will become active after|"
+                      "the next restart.][OK]");
+    }
+}
+
 /* The only place that ever writes to firmware: the status window's own
  * SAVE button (SW_SAVE). Covers the drive list and, if the user
  * actually changed them, the wifi/network config and the RTC/NTP
@@ -2472,21 +2695,28 @@ static int perform_save(DriveConfig *cfg, int firmware_backed)
     int i;
     int all_valid = 1;
     char msg[220];
+    int drives_changed;
     int network_changed;
     int rtc_changed;
+    int restart_required;
 
-    if (drive_config_ordinary_count(cfg) > MAX_ORDINARY_DRIVES) {
-        sprintf(msg, "[3][Validation error|Too many drives (max %d).][OK]", MAX_ORDINARY_DRIVES);
-        form_alert(1, msg);
-        all_valid = 0;
-    }
-    if (all_valid) {
-        for (i = 0; i < cfg->drive_count; i++) {
-            if (!validate_drive(&cfg->drives[i], cfg, i, msg)) {
-                form_alert(1, msg);
-                all_valid = 0;
-                break;
-            }
+    /* Captured before save_to_firmware() runs (and before it overwrites
+     * g_driveconfig_baseline on success) -- the restart decision must
+     * reflect what actually changed relative to the *previous* baseline,
+     * never a post-save diff against itself (which would always read
+     * "unchanged"). See the report. */
+    drives_changed = !drive_config_matches(cfg, &g_driveconfig_baseline);
+
+    /* No "too many drives" check needed: the array is fixed at exactly
+     * MAX_ORDINARY_DRIVES slots, so that failure mode is structurally
+     * impossible now. EMPTY slots carry no fields to validate. */
+    for (i = 0; i < MAX_DRIVES; i++) {
+        if (drive_slot_is_empty(&cfg->drives[i]))
+            continue;
+        if (!validate_drive(&cfg->drives[i], cfg, i, msg)) {
+            form_alert(1, msg);
+            all_valid = 0;
+            break;
         }
     }
 
@@ -2526,6 +2756,7 @@ static int perform_save(DriveConfig *cfg, int firmware_backed)
         form_alert(1, msg);
         return 0;
     }
+    g_driveconfig_baseline = *cfg; /* new known-good baseline, for the Quit check */
 
     if (network_changed) {
         if (!save_network_to_firmware(&g_netconfig, msg)) {
@@ -2543,30 +2774,13 @@ static int perform_save(DriveConfig *cfg, int firmware_backed)
         g_rtcconfig_baseline = g_rtcconfig; /* new known-good baseline */
     }
 
-    if (network_changed || rtc_changed) {
-        /* No Reset Now button here: an Atari reset does not reset the
-         * Pico, so it would not actually make the new settings active
-         * -- offering it would contradict the message below.
-         * Activating them needs a genuine Sidecartridge restart, which
-         * this program has no way to trigger. */
-        if (network_changed && rtc_changed) {
-            form_alert(1, "[1][Network and clock settings saved.|They become active after|"
-                          "restarting the Sidecartridge.][OK]");
-        } else if (network_changed) {
-            form_alert(1, "[1][Network settings saved.|They become active after|"
-                          "restarting the Sidecartridge.][OK]");
-        } else {
-            form_alert(1, "[1][Clock settings saved.|They become active after|"
-                          "restarting the Sidecartridge.][OK]");
-        }
-    } else {
-        /* Cancel is the default (button 1): a full-machine reset is
-         * easy to trigger by accident otherwise. */
-        if (form_alert(1, "[1][Configuration saved to SideTNFS.|Reboot required.|"
-                          "Multi-drive mounting is not active yet.][Cancel|Reset Now]") == 2) {
-            Supexec(atari_do_reset);
-        }
-    }
+    /* Fase 9B: one unified restart flow for anything that changed and
+     * was successfully saved -- see configuration_changes_require_restart()
+     * and offer_restart_if_needed(). Uses drives_changed/network_changed/
+     * rtc_changed exactly as captured above, never re-derived against the
+     * now-updated baselines. */
+    restart_required = configuration_changes_require_restart(drives_changed, network_changed, rtc_changed);
+    offer_restart_if_needed(restart_required);
     return 1;
 }
 
@@ -2584,7 +2798,6 @@ static void drives_window_run(DriveConfig *cfg)
     short x, y, w, h;
     short which;
     int done;
-    int i;
 
     ov_dialog_init();
     ov_refresh_rows(cfg);
@@ -2598,49 +2811,34 @@ static void drives_window_run(DriveConfig *cfg)
         which = (short)(form_do(ov_dlg, OV_ROOT) & 0x7FFF);
         wait_mouse_release();
 
-        if (which >= OV_ROW_BASE && which < OV_AFTER_ROWS) {
-            int obj_offset  = which - OV_ROW_BASE;
-            int row         = obj_offset / 2;
-            int is_edit_btn = (obj_offset % 2) == 1;
-            int result      = 0;
-            Drive *d;
+        if (which == OV_SETTINGS_BTN) {
+            cl_editor_run(cfg);
+            ov_refresh_rows(cfg);
+            objc_draw(ov_dlg, OV_ROOT, MAX_DEPTH, x, y, w, h);
 
-            if (is_edit_btn && row < cfg->drive_count) {
-                d = &cfg->drives[row];
-                switch (d->type) {
-                case DRIVE_TYPE_CONFIG:
-                    cl_editor_run(cfg, row);
-                    break;
-                case DRIVE_TYPE_TNFS:
-                    result = tnfs_editor_run(cfg, row);
-                    break;
-                case DRIVE_TYPE_SD:
-                    result = sd_editor_run(cfg, row);
-                    break;
-                }
-                if (result == 2) {
-                    for (i = row; i < cfg->drive_count - 1; i++)
-                        cfg->drives[i] = cfg->drives[i + 1];
-                    cfg->drive_count--;
-                }
-                /* Any edit/delete can change a letter or remove a row,
-                 * so re-sort before redrawing -- the config drive's row
-                 * position is not fixed, only its letter constraints. */
-                drive_config_sort_by_letter(cfg);
-                ov_refresh_rows(cfg);
-                objc_draw(ov_dlg, OV_ROOT, MAX_DEPTH, x, y, w, h);
-            }
+        } else if (which >= OV_ROW_BASE && which < OV_AFTER_ROWS) {
+            int obj_offset = which - OV_ROW_BASE;
+            int slot       = obj_offset / 2;
+            int is_btn     = (obj_offset % 2) == 1;
 
-        } else if (which == OV_ADD) {
-            if (drive_config_ordinary_count(cfg) >= MAX_ORDINARY_DRIVES) {
-                form_alert(1, "[3][Add disk|Maximum of 8 drives reached.][OK]");
-            } else {
-                int type = add_disk_type_run();
-                if (type == DRIVE_TYPE_TNFS)
-                    tnfs_editor_run(cfg, -1);
-                else if (type == DRIVE_TYPE_SD)
-                    sd_editor_run(cfg, -1);
-                drive_config_sort_by_letter(cfg);
+            if (is_btn) {
+                Drive *d = &cfg->drives[slot];
+
+                if (drive_slot_is_empty(d)) {
+                    int type = add_disk_type_run();
+                    if (type == DRIVE_TYPE_TNFS)
+                        tnfs_editor_run(cfg, slot);
+                    else if (type == DRIVE_TYPE_SD)
+                        sd_editor_run(cfg, slot);
+                    /* type == -1 (Cancel): slot stays EMPTY, nothing to do. */
+                } else if (d->type == DRIVE_TYPE_TNFS) {
+                    tnfs_editor_run(cfg, slot);
+                } else {
+                    sd_editor_run(cfg, slot);
+                }
+                /* Remove already clears the slot to EMPTY inside the
+                 * editor itself -- nothing extra to do here. Slots are
+                 * fixed-position: never re-sorted, never compacted. */
                 ov_refresh_rows(cfg);
                 objc_draw(ov_dlg, OV_ROOT, MAX_DEPTH, x, y, w, h);
             }
@@ -2735,7 +2933,7 @@ static void sw_dialog_init(void)
     sw_dlg[SW_DIV3].ob_spec.index = 0x00001171L;
 
     set_obj(sw_dlg, SW_LBL_DRIVES, G_STRING, NONE, NORMAL, xl, ylbldrv, 16*cw, rh);
-    sw_dlg[SW_LBL_DRIVES].ob_spec.free_string = "Active drives";
+    sw_dlg[SW_LBL_DRIVES].ob_spec.free_string = "Drives";
 
     for (i = 0; i < SW_NUM_DRIVE_LINES; i++) {
         int ry = ydrv0 + i * pitch;
@@ -2814,9 +3012,10 @@ static void status_refresh_network(const DriveConfig *cfg)
         sw_set_net_line(2, "IP address:", (g_netconfig.ip_address[0] != '\0') ? g_netconfig.ip_address : "-");
 
     /* TNFS server comes from the local DriveConfig, not g_netconfig --
-     * no firmware command sent for this line either. */
-    for (i = 0; i < cfg->drive_count; i++) {
-        if (cfg->drives[i].type == DRIVE_TYPE_TNFS) {
+     * no firmware command sent for this line either. Only ENABLED slots
+     * count: a DISABLED TNFS drive is stored but not actually active. */
+    for (i = 0; i < MAX_DRIVES; i++) {
+        if (drive_slot_is_enabled(&cfg->drives[i]) && cfg->drives[i].type == DRIVE_TYPE_TNFS) {
             if (tnfs_count == 0)
                 first_tnfs = &cfg->drives[i];
             tnfs_count++;
@@ -2841,52 +3040,60 @@ static void status_refresh_clock(void)
     strncpy(sw_clock_line[1], "Timezone: -",           SW_LINE_BUF - 1); sw_clock_line[1][SW_LINE_BUF - 1] = '\0';
 }
 
-/* Real data from the existing DriveConfig model. Caps the visible list
- * at SW_NUM_DRIVE_LINES (this is a compact summary, not the full editor
- * -- DRIVES still shows every configured drive) and shows an overflow
- * note on the last line rather than silently dropping entries. */
+/* Real data from the existing DriveConfig model. Line 0 is the
+ * unambiguous configured/active/inactive/empty summary (AtariConfig-3,
+ * section 8: "Active drives" must count ENABLED slots only); line 1 is
+ * the SETTINGS disk, which is always active and never one of the eight
+ * ordinary slots; the remaining lines list only ENABLED drives (a
+ * DISABLED one is stored but not actually active), capped at
+ * SW_NUM_DRIVE_LINES with an overflow note on the last line rather than
+ * silently dropping entries -- DRIVES still shows every slot. */
 static void status_refresh_drives(const DriveConfig *cfg)
 {
     int i;
-    int shown;
-    int overflow;
+    int line;
+    int configured = drive_config_configured_count(cfg);
+    int enabled    = drive_config_enabled_count(cfg);
+    int empty      = drive_config_empty_count(cfg);
+    int shown, overflow, remaining;
 
-    if (cfg->drive_count == 0) {
-        strncpy(sw_drive_line[0], "No active drives", SW_LINE_BUF - 1);
-        sw_drive_line[0][SW_LINE_BUF - 1] = '\0';
-        for (i = 1; i < SW_NUM_DRIVE_LINES; i++)
-            sw_drive_line[i][0] = '\0';
+    sprintf(sw_drive_line[0], "Configured:%d Active:%d Inactive:%d Empty:%d",
+            configured, enabled, configured - enabled, empty);
+    sprintf(sw_drive_line[1], "Settings disk: %c: (always active)", cfg->settings_letter);
+
+    remaining = SW_NUM_DRIVE_LINES - 2;
+
+    if (enabled == 0) {
+        strncpy(sw_drive_line[2], "No active drives", SW_LINE_BUF - 1);
+        sw_drive_line[2][SW_LINE_BUF - 1] = '\0';
+        for (line = 3; line < SW_NUM_DRIVE_LINES; line++)
+            sw_drive_line[line][0] = '\0';
         return;
     }
 
-    overflow = cfg->drive_count > SW_NUM_DRIVE_LINES;
-    shown = overflow ? (SW_NUM_DRIVE_LINES - 1) : cfg->drive_count;
+    overflow = enabled > remaining;
+    shown = overflow ? (remaining - 1) : enabled;
 
-    for (i = 0; i < shown; i++) {
+    line = 2;
+    for (i = 0; i < MAX_DRIVES && (line - 2) < shown; i++) {
         const Drive *d = &cfg->drives[i];
         const char *type_abbrev;
 
-        /* Status-window-only abbreviation (CFG/SD/TNFS) -- the roomier
-         * Drives sub-window still uses drive_type_name()'s full names.
-         * No path column here (see the Drives window for full detail);
-         * dropping it frees the space to show more of the nickname. */
-        switch (d->type) {
-        case DRIVE_TYPE_CONFIG: type_abbrev = "CFG";  break;
-        case DRIVE_TYPE_SD:     type_abbrev = "SD";   break;
-        case DRIVE_TYPE_TNFS:   type_abbrev = "TNFS"; break;
-        default:                type_abbrev = "?";    break;
-        }
-        sprintf(sw_drive_line[i], "%c:  %-30.30s%4s",
-                d->letter, d->nickname, type_abbrev);
+        if (!drive_slot_is_enabled(d))
+            continue;
+
+        type_abbrev = (d->type == DRIVE_TYPE_TNFS) ? "TNFS" : "SD";
+        sprintf(sw_drive_line[line], "%c:  %-30.30s%4s", d->letter, d->nickname, type_abbrev);
+        line++;
     }
 
     if (overflow) {
-        sprintf(sw_drive_line[shown], "...and %d more (see Drives)", cfg->drive_count - shown);
-        shown++;
+        sprintf(sw_drive_line[line], "...and %d more (see Drives)", enabled - shown);
+        line++;
     }
 
-    for (i = shown; i < SW_NUM_DRIVE_LINES; i++)
-        sw_drive_line[i][0] = '\0';
+    for (; line < SW_NUM_DRIVE_LINES; line++)
+        sw_drive_line[line][0] = '\0';
 }
 
 /* Updates all three status sections' text buffers. Does not redraw --
@@ -2918,6 +3125,7 @@ void dialog_run(DriveConfig *cfg)
      * dialog_startup_load(). Without firmware, Save has nothing to
      * write to and says so. */
     firmware_backed = dialog_startup_load(cfg);
+    g_driveconfig_baseline = *cfg; /* known-good snapshot, for the Quit-with-unsaved-changes check below */
 
     /* Fase AC-4 (network protocol): loaded after the drive protocol,
      * regardless of firmware_backed -- with no firmware at all this
@@ -2964,7 +3172,28 @@ void dialog_run(DriveConfig *cfg)
             objc_draw(sw_dlg, SW_ROOT, MAX_DEPTH, x, y, w, h);
             break;
 
-        case SW_QUIT:
+        case SW_QUIT: {
+            /* Unsaved-changes warning: drives compared against the
+             * last-loaded/last-saved snapshot (g_driveconfig_baseline),
+             * network/RTC against their own existing baselines -- same
+             * "only if actually changed" idiom perform_save() already
+             * uses to decide what to write. */
+            int drives_changed = !drive_config_matches(cfg, &g_driveconfig_baseline);
+            int net_changed    = netconfig_changed(&g_netconfig, &g_netconfig_baseline);
+            int rtc_pending    = rtcconfig_changed(&g_rtcconfig, &g_rtcconfig_baseline);
+
+            if (drives_changed || net_changed || rtc_pending) {
+                /* Cancel is the default (button 1): quitting with
+                 * unsaved changes is easy to trigger by accident
+                 * otherwise. */
+                if (form_alert(1, "[2][Unsaved changes.|Quit without saving?][Cancel|Quit Anyway]") == 2)
+                    done = 1;
+            } else {
+                done = 1;
+            }
+            break;
+        }
+
         default:
             done = 1;
             break;

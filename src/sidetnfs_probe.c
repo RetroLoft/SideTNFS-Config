@@ -1,14 +1,22 @@
 /*
- * Fase AC-4: SideTNFS config-protocol version 2 -- GET_CONFIG_INFO
+ * Fase AC-4: SideTNFS config-protocol -- GET_CONFIG_INFO
  * (0x040D), GET_DRIVE (0x040E), SET_DRIVE (0x040F), DELETE_DRIVE
  * (0x0410), SET_CONFIG_DRIVE (0x0411), SAVE_CONFIG (0x0412), plus
  * (Fase 11A/AC-4-2) GET_NETWORK_CONFIG (0x0413), SET_NETWORK_CONFIG
  * (0x0414), SAVE_NETWORK_CONFIG (0x0415), plus (Fase 12A)
  * GET_RTC_CONFIG (0x0416), SET_RTC_CONFIG (0x0417), SAVE_RTC_CONFIG
- * (0x0418).
+ * (0x0418), plus (Fase 9B) REBOOT_PICO (0x041B, GEMDRVEMUL_REBOOT_PICO --
+ * no relation to the SIDETNFS config sub-protocol/version, a plain
+ * GEMDRVEMUL command like PING). Command numbers, offsets and payload shapes are unchanged
+ * since protocol v2; AtariConfig Fase 3 (Pico Fase 12B) bumped the
+ * protocol version itself to 3 because the drive record's DRIVE_STATE
+ * field (formerly DRIVE_USED) now carries a three-value
+ * EMPTY/DISABLED/ENABLED state instead of a 0/1 boolean at the exact
+ * same wire offset -- see SIDETNFS_CONFIG_PROTOCOL_VERSION and
+ * sidetnfs_probe.h's own header comment.
  *
  * Protocol cross-checked against (read-only references, not modified):
- *   sd2tnfs/docs/sidetnfs-config-protocol.md      (contract, protocol v2)
+ *   sd2tnfs/docs/sidetnfs-config-protocol.md      (contract, protocol v3)
  *   sd2tnfs/romemul/include/gemdrvemul.h          (offsets, walked from
  *     GEMDRVEMUL_SIDETNFS_CONFIG, not guessed -- re-verified for the
  *     network block: GEMDRVEMUL_SIDETNFS_NETWORK = DRIVE_SD_PATH +
@@ -86,6 +94,7 @@
 #define CMD_GET_RTC_CONFIG      0x0416UL
 #define CMD_SET_RTC_CONFIG      0x0417UL
 #define CMD_SAVE_RTC_CONFIG     0x0418UL
+#define CMD_REBOOT_PICO         0x041BUL /* Fase 9B: APP_GEMDRVEMUL<<8 | 0x1B, commands.h */
 
 #define RANDOM_TOKEN_OFFSET      0x0000UL /* echoed token, polled after completion */
 #define RANDOM_TOKEN_SEED_OFFSET 0x0004UL /* Pico-published seed, read before sending */
@@ -99,9 +108,12 @@
 #define RESP_CONFIG_DRIVE_LETTER_OFFSET 0x43A4UL
 #define RESP_CONFIG_STATUS_OFFSET       0x43A8UL
 
-/* GEMDRVEMUL_SIDETNFS_DRIVE = CONFIG_STATUS + 4 = 0x43AC */
+/* GEMDRVEMUL_SIDETNFS_DRIVE = CONFIG_STATUS + 4 = 0x43AC. Fase 12B/
+ * AtariConfig-3: byte-identical to protocol v2 -- only DRIVE_USED (bool)
+ * was renamed to DRIVE_STATE (0 EMPTY/1 DISABLED/2 ENABLED) at the exact
+ * same offset/width, see sidetnfs_probe.h's own header comment. */
 #define DRIVE_STATUS_OFFSET      0x43ACUL /* uint32_t */
-#define DRIVE_USED_OFFSET        0x43B0UL /* uint16_t */
+#define DRIVE_STATE_OFFSET       0x43B0UL /* uint16_t */
 #define DRIVE_LETTER_OFFSET      0x43B2UL /* uint16_t */
 #define DRIVE_TYPE_OFFSET        0x43B4UL /* uint16_t */
 #define DRIVE_TRANSPORT_OFFSET   0x43B6UL /* uint16_t */
@@ -112,7 +124,7 @@
 #define DRIVE_SD_PATH_OFFSET     0x4432UL /* char[64], block ends 0x4472 */
 
 /* SET_DRIVE request payload size, excluding the 4-byte token:
- * index(4) + used+letter+type+transport+port(2 each=10) + strings
+ * index(4) + state+letter+type+transport+port(2 each=10) + strings
  * (24+64+32+64=184) = 198 bytes. */
 #define SET_DRIVE_PAYLOAD_BYTES \
     (4UL + 2UL*5UL + (unsigned long)SIDETNFS_NICKNAME_LEN + (unsigned long)SIDETNFS_HOST_LEN + \
@@ -317,7 +329,7 @@ int sidetnfs_probe_get_drive(unsigned long index, SideTnfsDriveInfo *info)
         return SIDETNFS_PROBE_TIMEOUT;
 
     info->status    = rom3_read_long(DRIVE_STATUS_OFFSET);
-    info->used      = rom3_read_word(DRIVE_USED_OFFSET);
+    info->state     = rom3_read_word(DRIVE_STATE_OFFSET);
     info->letter    = rom3_read_word(DRIVE_LETTER_OFFSET);
     info->type      = rom3_read_word(DRIVE_TYPE_OFFSET);
     info->transport = rom3_read_word(DRIVE_TRANSPORT_OFFSET);
@@ -335,7 +347,7 @@ int sidetnfs_probe_set_drive(unsigned long index, const SideTnfsDriveInfo *in, u
     unsigned long seed = send_command_start(CMD_SET_DRIVE, SET_DRIVE_PAYLOAD_BYTES);
 
     send_param32(index);
-    send_param16(in->used);
+    send_param16(in->state);
     send_param16(in->letter);
     send_param16(in->type);
     send_param16(in->transport);
@@ -484,5 +496,20 @@ int sidetnfs_probe_save_rtc_config(unsigned long *out_status)
         return SIDETNFS_PROBE_TIMEOUT;
 
     *out_status = rom3_read_long(RTC_STATUS_OFFSET);
+    return SIDETNFS_PROBE_OK;
+}
+
+/* Fase 9B: no payload, no status field to read back -- the firmware's
+ * only response is the same generic ACK (random-token echo) every other
+ * command uses, written before it starts its own short delay + reboot.
+ * Sent exactly once: no retry loop here, so a caller can never arm two
+ * concurrent reboot requests by accident. */
+int sidetnfs_probe_reboot_pico(void)
+{
+    unsigned long seed = send_command_start(CMD_REBOOT_PICO, 0UL);
+
+    if (!wait_for_token(seed, PROBE_TIMEOUT_SEC))
+        return SIDETNFS_PROBE_TIMEOUT;
+
     return SIDETNFS_PROBE_OK;
 }

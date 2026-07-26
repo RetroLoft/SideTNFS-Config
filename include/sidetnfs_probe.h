@@ -1,12 +1,23 @@
 #ifndef SIDETNFS_PROBE_H
 #define SIDETNFS_PROBE_H
 
-/* Fase AC-4: SideTNFS config-protocol version 2. Six commands, all
- * cross-checked against sd2tnfs/docs/sidetnfs-config-protocol.md and the
- * firmware headers it documents -- no offsets/lengths/statuses guessed.
- * This module is a pure protocol layer: it knows nothing about the UI's
- * DriveConfig/Drive model (drive.h). dialog.c translates explicitly
- * between the two. */
+/* AtariConfig Fase 3: SideTNFS config-protocol version 3. Cross-checked
+ * against sd2tnfs/romemul/include/{gemdrvemul.h,sidetnfs_config.h,
+ * commands.h} and sidetnfs_config.c -- no offsets/lengths/statuses
+ * guessed. This module is a pure protocol layer: it knows nothing about
+ * the UI's DriveConfig/Drive model (drive.h). dialog.c translates
+ * explicitly between the two.
+ *
+ * Fase 12B/AtariConfig-3: the drive record's wire layout (offsets, field
+ * widths) is BYTE-IDENTICAL to protocol v2 -- only the first field's
+ * name and value range changed: DRIVE_USED (0/1 bool) -> DRIVE_STATE
+ * (0 EMPTY/1 DISABLED/2 ENABLED), same offset, same uint16_t plain-word
+ * wire type. GET_DRIVE's own STATUS field also changed meaning: from
+ * protocol v3 on it is OK for every valid index 0..SIDETNFS_MAX_DRIVES-1
+ * regardless of state (EMPTY included) -- only an out-of-range index is
+ * ever INVALID_INDEX now. EMPTY_SLOT is no longer returned by GET_DRIVE;
+ * it can still be returned by DELETE_DRIVE (already-empty slot) and by
+ * the firmware's internal set-state-only helper. */
 
 #define SIDETNFS_PROBE_OK      0
 #define SIDETNFS_PROBE_TIMEOUT 1
@@ -16,14 +27,19 @@
 #define SIDETNFS_MOUNTPATH_LEN  32
 #define SIDETNFS_SDPATH_LEN     64
 
-#define SIDETNFS_DRIVE_TYPE_NONE 0
+#define SIDETNFS_DRIVE_TYPE_NONE 0 /* EMPTY slot's zeroed type field reads back as this */
 #define SIDETNFS_DRIVE_TYPE_SD   1
 #define SIDETNFS_DRIVE_TYPE_TNFS 2
+
+/* Matches sidetnfs_drive_slot_state_t (sidetnfs_config.h) value-for-value. */
+#define SIDETNFS_DRIVE_STATE_EMPTY    0
+#define SIDETNFS_DRIVE_STATE_DISABLED 1
+#define SIDETNFS_DRIVE_STATE_ENABLED  2
 
 #define SIDETNFS_TRANSPORT_UDP 0
 #define SIDETNFS_TRANSPORT_TCP 1
 
-/* protocol/status codes -- sidetnfs-config-protocol.md "Statuscodes" */
+/* protocol/status codes -- sidetnfs_config_status_t (sidetnfs_config.h) */
 #define SIDETNFS_STATUS_OK                     0
 #define SIDETNFS_STATUS_INVALID_INDEX          1
 #define SIDETNFS_STATUS_EMPTY_SLOT             2
@@ -39,12 +55,15 @@
 #define SIDETNFS_STATUS_FLASH_WRITE_FAILED     12
 #define SIDETNFS_STATUS_CRC_MISMATCH           13
 #define SIDETNFS_STATUS_UNSUPPORTED_VERSION    14
+#define SIDETNFS_STATUS_INVALID_DRIVE_STATE    15 /* Fase 12B: drives[] record's state byte outside 0/1/2 */
+
+#define SIDETNFS_CONFIG_PROTOCOL_VERSION 3UL
 
 typedef struct {
     unsigned long protocol_version;
-    unsigned long max_drives;         /* ordinary drives only, excludes the config drive */
-    unsigned long drive_count;
-    unsigned long config_drive_letter; /* ASCII code */
+    unsigned long max_drives;         /* ordinary drives only, excludes the SETTINGS disk */
+    unsigned long drive_count;        /* configured (DISABLED+ENABLED) ordinary-drive count, excludes EMPTY */
+    unsigned long config_drive_letter; /* SETTINGS disk letter, ASCII code */
     unsigned long status;
 } SideTnfsConfigInfo;
 
@@ -53,10 +72,10 @@ typedef struct {
  * exactly (see sidetnfs_config.h), independent of the UI's drive.h
  * lengths even though the numbers happen to match today. */
 typedef struct {
-    unsigned long status;    /* only meaningful after GET_DRIVE/SET_DRIVE etc return OK */
-    unsigned long used;
-    unsigned long letter;    /* ASCII code */
-    unsigned long type;      /* SIDETNFS_DRIVE_TYPE_* */
+    unsigned long status; /* only meaningful after GET_DRIVE/SET_DRIVE etc return OK */
+    unsigned long state;  /* SIDETNFS_DRIVE_STATE_* -- EMPTY/DISABLED/ENABLED */
+    unsigned long letter;    /* ASCII code, meaningless when state == EMPTY */
+    unsigned long type;      /* SIDETNFS_DRIVE_TYPE_*, meaningless when state == EMPTY */
     unsigned long transport; /* SIDETNFS_TRANSPORT_* */
     unsigned long port;
     char nickname[SIDETNFS_NICKNAME_LEN];
@@ -149,5 +168,18 @@ int sidetnfs_probe_save_network_config(unsigned long *out_status);
 int sidetnfs_probe_get_rtc_config(SideTnfsRtcConfig *info);
 int sidetnfs_probe_set_rtc_config(const SideTnfsRtcConfig *in, unsigned long *out_status);
 int sidetnfs_probe_save_rtc_config(unsigned long *out_status);
+
+/* Fase 9B: controlled Pico reboot (GEMDRVEMUL_REBOOT_PICO, 0x041B). No
+ * request payload, no response status field -- the firmware ACKs with
+ * the same generic random-token handshake every other command uses
+ * (write_random_token()), written BEFORE its own short fixed delay and
+ * watchdog_reboot(), then never SAVEs anything (drive/network/RTC
+ * config and flash defaults are untouched -- only the already-persisted
+ * configuration is (re)loaded on the next boot). Returns
+ * SIDETNFS_PROBE_OK once the ACK is seen, or SIDETNFS_PROBE_TIMEOUT if
+ * it never arrives -- e.g. firmware older than this command, which
+ * never recognizes 0x041B and so never ACKs it. Sends the request
+ * exactly once; never retried, so it can never arm a second reboot. */
+int sidetnfs_probe_reboot_pico(void);
 
 #endif
