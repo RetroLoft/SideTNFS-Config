@@ -169,6 +169,28 @@ int sidetnfs_probe_get_rtc_config(SideTnfsRtcConfig *info);
 int sidetnfs_probe_set_rtc_config(const SideTnfsRtcConfig *in, unsigned long *out_status);
 int sidetnfs_probe_save_rtc_config(unsigned long *out_status);
 
+/* Live RTC/NTP synchronisation state, as opposed to the stored settings
+ * GET_RTC_CONFIG returns. Read straight from the two status longs the
+ * Pico publishes in the ROM3 exchange area and the GEMDRIVE ROM already
+ * acts on; no command is sent, so this never blocks and never times out.
+ *
+ * SYNCED means the Pico explicitly published a synchronised date/time
+ * this boot -- it is never inferred from a plausible Atari date, from a
+ * live network connection, or from "NTP enabled" alone. */
+#define SIDETNFS_RTC_SYNC_DISABLED   0 /* RTC/NTP switched off in the firmware */
+#define SIDETNFS_RTC_SYNC_SYNCED     1 /* Pico published a synchronised clock */
+#define SIDETNFS_RTC_SYNC_NOT_SYNCED 2 /* enabled, but never synchronised */
+int sidetnfs_probe_get_rtc_sync_state(void);
+
+/* Live WiFi link state, the network counterpart of the RTC sync state
+ * above and read the same way -- no command is sent. CONNECTED means the
+ * Pico brought WiFi up during its own boot; nothing in the protocol
+ * reports an association lost after that, so this is a boot-time
+ * snapshot rather than a live link poll. */
+#define SIDETNFS_NET_LINK_NOT_CONNECTED 0
+#define SIDETNFS_NET_LINK_CONNECTED     1
+int sidetnfs_probe_get_network_link_state(void);
+
 /* Fase 9B: controlled Pico reboot (GEMDRVEMUL_REBOOT_PICO, 0x041B). No
  * request payload, no response status field -- the firmware ACKs with
  * the same generic random-token handshake every other command uses

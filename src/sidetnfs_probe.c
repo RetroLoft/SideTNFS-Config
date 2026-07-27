@@ -513,3 +513,88 @@ int sidetnfs_probe_reboot_pico(void)
 
     return SIDETNFS_PROBE_OK;
 }
+
+/* ------------------------------------------------------------------ *
+ * Live RTC/NTP synchronisation state.
+ *
+ * Not a protocol command: nothing is sent and no token handshake is
+ * involved. GEMDRVEMUL_RTC_ENABLED and GEMDRVEMUL_RTC_STATUS are two
+ * plain status longs the Pico writes into the low ROM3 exchange area
+ * during its own boot, and that the GEMDRIVE ROM already reads exactly
+ * this way (sidecart-gemdrive-atari/src/gemdrive.s: `tst.l
+ * GEMDRVEMUL_RTC_ENABLED` and `move.l GEMDRVEMUL_RTC_STATUS,d0` /
+ * `cmp.l #GEMDRV_STATUS_READY`). Reading them here is the same kind of
+ * side-effect-free read wait_for_token() already does on the token
+ * field, so it cannot be mistaken for a command trigger.
+ *
+ * Offsets walked from sd2tnfs/romemul/include/gemdrvemul.h, and
+ * cross-checked against the ROM's own equ list:
+ *   RANDOM_TOKEN       0x00
+ *   RANDOM_TOKEN_SEED  0x04
+ *   TIMEOUT_SEC        0x08
+ *   PING_STATUS        0x0C
+ *   RTC_STATUS         0x10
+ *   NETWORK_STATUS     0x18   (RTC_STATUS + 8)
+ *   RTC_ENABLED        0x1C
+ *
+ * The firmware writes RTC_STATUS unswapped, and the only two values it
+ * ever produces (0 and 0xFFFFFFFF) are byte-order invariant, so the
+ * READY test is exact regardless of endianness. RTC_ENABLED is a raw
+ * 0/1 store whose byte order is NOT invariant, so it is tested for
+ * non-zero only -- precisely what the ROM's own `tst.l` does.
+ * ------------------------------------------------------------------ */
+#define RTC_SYNC_STATUS_OFFSET  0x0010UL
+#define RTC_SYNC_ENABLED_OFFSET 0x001CUL
+
+#define GEMDRV_STATUS_READY 0xFFFFFFFFUL /* gemdrive.s GEMDRV_STATUS_READY (-1) */
+
+int sidetnfs_probe_get_rtc_sync_state(void)
+{
+    unsigned long status;
+
+    if (rom3_read_long(RTC_SYNC_ENABLED_OFFSET) == 0UL)
+        return SIDETNFS_RTC_SYNC_DISABLED;
+
+    status = rom3_read_long(RTC_SYNC_STATUS_OFFSET);
+    if (status == GEMDRV_STATUS_READY)
+        return SIDETNFS_RTC_SYNC_SYNCED;
+
+    /* GEMDRV_STATUS_BUSY (0, the initial value -- the bounded boot-time
+     * NTP attempt never completed) and GEMDRV_STATUS_FAILED (1) are both
+     * reported as "not synchronized". The Pico's NTP attempt happens once
+     * during its own boot and is already over by the time this program
+     * can run, so a 0 here means "never synchronised", never "still
+     * busy" -- there is no in-progress state left to report. */
+    return SIDETNFS_RTC_SYNC_NOT_SYNCED;
+}
+
+/* ------------------------------------------------------------------ *
+ * Live WiFi link state.
+ *
+ * GEMDRVEMUL_NETWORK_STATUS is the network sibling of the RTC status
+ * long above, with the same tri-state convention, and is read the same
+ * side-effect-free way. The firmware sets it to GEMDRV_STATUS_READY at
+ * exactly the point it sets its own sidetnfs_network_ok flag -- the last
+ * moment in boot where the WiFi association and the network stack are
+ * both known to be up (sd2tnfs/romemul/gemdrvemul.c). Until then it
+ * holds its initial 0.
+ *
+ * This is a boot-time snapshot, not a live link poll: it proves WiFi
+ * came up during the Pico's own boot. Nothing in the protocol reports an
+ * association that drops afterwards, so CONNECTED must be read as
+ * "connected at boot".
+ * ------------------------------------------------------------------ */
+#define NETWORK_LINK_STATUS_OFFSET 0x0018UL
+
+int sidetnfs_probe_get_network_link_state(void)
+{
+    if (rom3_read_long(NETWORK_LINK_STATUS_OFFSET) == GEMDRV_STATUS_READY)
+        return SIDETNFS_NET_LINK_CONNECTED;
+
+    /* GEMDRV_STATUS_BUSY (0 -- WiFi never came up, including the case
+     * where no SSID is configured and the firmware never tried) and
+     * GEMDRV_STATUS_FAILED (1) are both "not connected". The Pico's WiFi
+     * attempt is bounded and finished long before this program can run,
+     * so a 0 here never means "still connecting". */
+    return SIDETNFS_NET_LINK_NOT_CONNECTED;
+}
