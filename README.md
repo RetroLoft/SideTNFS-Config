@@ -53,3 +53,11 @@ to and reports a clear error instead.
   its details if you want it back.
 - Changes only take effect after **Save**, and only become active once
   the Sidecartridge itself restarts.
+
+## Release assets
+
+**Important:** `README.TXT` (the SETTINGS-disk-facing readme, distinct
+from this file) must always be published as a release asset alongside
+`SIDETNFS.PRG` -- never release the `.PRG` on its own. `make`/`make
+install` already copies both together (see `DISTFILES` in the
+`Makefile`); keep that in sync if the release process changes.
