@@ -180,24 +180,29 @@ enum {
     SW_ROOT = 0,
     SW_TITLE,
     SW_DIV1,
-    SW_LBL_NETWORK,
-    SW_NET_LINE_0, SW_NET_LINE_1, SW_NET_LINE_2, SW_NET_LINE_3,
+    /* Network: no separate heading any more -- "Network:" is itself the
+     * first value line, carrying the live connection status. */
+    SW_NET_LINE_0, SW_NET_LINE_1, SW_NET_LINE_2,
     SW_DIV2,
-    SW_LBL_CLOCK,
-    SW_CLOCK_LINE_0, SW_CLOCK_LINE_1,
+    /* Clock: the "Clock:" label and the live date/time are separate
+     * objects so a tick can repaint the time alone. */
+    SW_CLOCK_LBL,
+    SW_CLOCK_NOW,
+    SW_CLOCK_NTP,
     SW_DIV3,
-    SW_LBL_DRIVES,
+    SW_DRIVE_HEADER,                 /* "Active drives:" + the count, right-aligned */
     SW_DRIVE_LINE_BASE
 };
 #define SW_NUM_DRIVE_LINES   5
 #define SW_DRIVE_LINE(i)     (SW_DRIVE_LINE_BASE + (i))
 #define SW_AFTER_DRIVE_LINES (SW_DRIVE_LINE_BASE + SW_NUM_DRIVE_LINES)
-#define SW_DIV4    (SW_AFTER_DRIVE_LINES + 0)
-#define SW_CONFIG  (SW_AFTER_DRIVE_LINES + 1)
-#define SW_DRIVES  (SW_AFTER_DRIVE_LINES + 2)
-#define SW_SAVE    (SW_AFTER_DRIVE_LINES + 3)
-#define SW_QUIT    (SW_AFTER_DRIVE_LINES + 4)
-#define SW_NOBJS   (SW_AFTER_DRIVE_LINES + 5)
+#define SW_DRIVE_MORE (SW_AFTER_DRIVE_LINES + 0) /* "(and N more)", blank when everything fits */
+#define SW_DIV4    (SW_AFTER_DRIVE_LINES + 1)
+#define SW_CONFIG  (SW_AFTER_DRIVE_LINES + 2)
+#define SW_DRIVES  (SW_AFTER_DRIVE_LINES + 3)
+#define SW_SAVE    (SW_AFTER_DRIVE_LINES + 4)
+#define SW_QUIT    (SW_AFTER_DRIVE_LINES + 5)
+#define SW_NOBJS   (SW_AFTER_DRIVE_LINES + 6)
 
 static OBJECT cl_dlg[CL_NOBJS];
 static OBJECT sd_dlg[SD_NOBJS];
@@ -357,9 +362,38 @@ static char ov_settings_val[OV_SETTINGS_BUF];
 /* Status window text buffers (Fase AC-6)                              */
 /* ================================================================== */
 #define SW_LINE_BUF 48
-static char sw_net_line[4][SW_LINE_BUF];
-static char sw_clock_line[2][SW_LINE_BUF];
+
+/* Every status line object is laid out SW_LINE_COLS characters wide at the
+ * section's left margin, so a line formatted to exactly that many
+ * characters ends flush with the box's right margin. That is what makes
+ * "right-aligned" here a property of the text, not of a pixel position. */
+#define SW_LINE_COLS 40
+
+/* "Network: ", "SSID:    ", "IP:      ", "Clock:   ", "NTP:     " all put
+ * their value in the same column. */
+#define SW_LABEL_COLS 9
+
+static char sw_net_line[3][SW_LINE_BUF];
+static char sw_clock_ntp[SW_LINE_BUF];
+static char sw_drive_header[SW_LINE_BUF];
 static char sw_drive_line[SW_NUM_DRIVE_LINES][SW_LINE_BUF];
+static char sw_drive_more[SW_LINE_BUF];
+
+/* Live Atari clock shown on the Clock header line. "DD-MM-YYYY HH:MM:SS"
+ * is 19 characters; the buffer leaves room for a NUL and then some. */
+#define SW_CLOCK_TEXT_BUF   24
+#define SW_CLOCK_FULL_CHARS 19
+#define SW_CLOCK_SHORT_CHARS 8 /* "HH:MM:SS", used when the field is too narrow */
+static char sw_clock_now[SW_CLOCK_TEXT_BUF];
+
+/* How many characters the clock field is laid out for -- decided once in
+ * sw_dialog_init() from the real window geometry, never a fixed guess. 0
+ * means there was no room at all and the clock is simply not shown. */
+static int sw_clock_field_chars;
+
+/* One second. GEMDOS keeps seconds in two-second steps, so a faster tick
+ * would only redraw the same text; anything slower would visibly lag. */
+#define SW_CLOCK_TICK_MS 1000
 
 /* ================================================================== */
 /* Shared helpers                                                      */
@@ -2864,8 +2898,8 @@ static void sw_dialog_init(void)
     short sx, sy, ssw, sh;
     int rh, tm, pitch;
     int DW, DH, xl;
-    int yt, ydiv1, ylblnet, ynet0, ynet1, ynet2, ynet3, ydiv2,
-        ylblclock, yclock0, yclock1, ydiv3, ylbldrv, ydrv0, ydiv4, ybtn;
+    int yt, ydiv1, ynet0, ynet1, ynet2, ydiv2,
+        yclock0, yclock1, ydiv3, ylbldrv, ydrv0, ydiv4, ybtn;
     int i;
 
     graf_handle(&cw, &ch, &bw, &bh);
@@ -2879,21 +2913,24 @@ static void sw_dialog_init(void)
     DW = 44 * cw;
     xl = 2 * cw;
 
+    /* Each section now starts straight with its own value lines: the
+     * former "Network"/"Clock"/"Drives" headings are gone, because the
+     * first line of each section carries the heading itself. */
     yt        = tm;
     ydiv1     = yt + rh + 1;
-    ylblnet   = ydiv1 + 5;
-    ynet0     = ylblnet + pitch;
+    ynet0     = ydiv1 + 5;
     ynet1     = ynet0 + pitch;
     ynet2     = ynet1 + pitch;
-    ynet3     = ynet2 + pitch;
-    ydiv2     = ynet3 + rh + 2;
-    ylblclock = ydiv2 + 2;
-    yclock0   = ylblclock + pitch;
+    ydiv2     = ynet2 + rh + 2;
+    yclock0   = ydiv2 + 5;
     yclock1   = yclock0 + pitch;
     ydiv3     = yclock1 + rh + 2;
-    ylbldrv   = ydiv3 + 2;
+    ylbldrv   = ydiv3 + 5;
     ydrv0     = ylbldrv + pitch;
-    ydiv4     = ydrv0 + SW_NUM_DRIVE_LINES * pitch + 2;
+    /* +1 for the "(and N more)" line, which is always present as an
+     * object and simply left blank when everything fits -- so the
+     * dividers and buttons never move as the drive count changes. */
+    ydiv4     = ydrv0 + (SW_NUM_DRIVE_LINES + 1) * pitch + 2;
     ybtn      = ydiv4 + 7;
     DH        = ybtn + rh + tm + 3;
 
@@ -2906,40 +2943,58 @@ static void sw_dialog_init(void)
     set_obj(sw_dlg, SW_DIV1, G_BOX, NONE, NORMAL, cw, ydiv1, DW - 2*cw, 2);
     sw_dlg[SW_DIV1].ob_spec.index = 0x00001171L;
 
-    set_obj(sw_dlg, SW_LBL_NETWORK, G_STRING, NONE, NORMAL, xl, ylblnet, 12*cw, rh);
-    sw_dlg[SW_LBL_NETWORK].ob_spec.free_string = "Network";
-
-    set_obj(sw_dlg, SW_NET_LINE_0, G_STRING, NONE, NORMAL, xl, ynet0, 40*cw, rh);
+    set_obj(sw_dlg, SW_NET_LINE_0, G_STRING, NONE, NORMAL, xl, ynet0, SW_LINE_COLS*cw, rh);
     sw_dlg[SW_NET_LINE_0].ob_spec.free_string = sw_net_line[0];
-    set_obj(sw_dlg, SW_NET_LINE_1, G_STRING, NONE, NORMAL, xl, ynet1, 40*cw, rh);
+    set_obj(sw_dlg, SW_NET_LINE_1, G_STRING, NONE, NORMAL, xl, ynet1, SW_LINE_COLS*cw, rh);
     sw_dlg[SW_NET_LINE_1].ob_spec.free_string = sw_net_line[1];
-    set_obj(sw_dlg, SW_NET_LINE_2, G_STRING, NONE, NORMAL, xl, ynet2, 40*cw, rh);
+    set_obj(sw_dlg, SW_NET_LINE_2, G_STRING, NONE, NORMAL, xl, ynet2, SW_LINE_COLS*cw, rh);
     sw_dlg[SW_NET_LINE_2].ob_spec.free_string = sw_net_line[2];
-    set_obj(sw_dlg, SW_NET_LINE_3, G_STRING, NONE, NORMAL, xl, ynet3, 40*cw, rh);
-    sw_dlg[SW_NET_LINE_3].ob_spec.free_string = sw_net_line[3];
 
     set_obj(sw_dlg, SW_DIV2, G_BOX, NONE, NORMAL, cw, ydiv2, DW - 2*cw, 2);
     sw_dlg[SW_DIV2].ob_spec.index = 0x00001171L;
 
-    set_obj(sw_dlg, SW_LBL_CLOCK, G_STRING, NONE, NORMAL, xl, ylblclock, 12*cw, rh);
-    sw_dlg[SW_LBL_CLOCK].ob_spec.free_string = "Clock";
+    /* "Clock:" and the live date/time are two objects on one line: the
+     * label never changes, so a tick repaints only the time. The time
+     * starts in the shared value column, exactly like every other value
+     * in this window, so it lines up with the rows above and below
+     * instead of floating at its own coordinate. */
+    set_obj(sw_dlg, SW_CLOCK_LBL, G_STRING, NONE, NORMAL, xl, yclock0, SW_LABEL_COLS*cw, rh);
+    sw_dlg[SW_CLOCK_LBL].ob_spec.free_string = "Clock:";
 
-    set_obj(sw_dlg, SW_CLOCK_LINE_0, G_STRING, NONE, NORMAL, xl, yclock0, 40*cw, rh);
-    sw_dlg[SW_CLOCK_LINE_0].ob_spec.free_string = sw_clock_line[0];
-    set_obj(sw_dlg, SW_CLOCK_LINE_1, G_STRING, NONE, NORMAL, xl, yclock1, 40*cw, rh);
-    sw_dlg[SW_CLOCK_LINE_1].ob_spec.free_string = sw_clock_line[1];
+    {
+        int avail_chars = SW_LINE_COLS - SW_LABEL_COLS;
+
+        if (avail_chars >= SW_CLOCK_FULL_CHARS)
+            sw_clock_field_chars = SW_CLOCK_FULL_CHARS;
+        else if (avail_chars >= SW_CLOCK_SHORT_CHARS)
+            sw_clock_field_chars = SW_CLOCK_SHORT_CHARS;
+        else
+            sw_clock_field_chars = 0;
+
+        sw_clock_now[0] = '\0';
+        set_obj(sw_dlg, SW_CLOCK_NOW, G_STRING, NONE, NORMAL,
+                xl + SW_LABEL_COLS*cw, yclock0, sw_clock_field_chars * cw, rh);
+        sw_dlg[SW_CLOCK_NOW].ob_spec.free_string = sw_clock_now;
+    }
+
+    set_obj(sw_dlg, SW_CLOCK_NTP, G_STRING, NONE, NORMAL, xl, yclock1, SW_LINE_COLS*cw, rh);
+    sw_dlg[SW_CLOCK_NTP].ob_spec.free_string = sw_clock_ntp;
 
     set_obj(sw_dlg, SW_DIV3, G_BOX, NONE, NORMAL, cw, ydiv3, DW - 2*cw, 2);
     sw_dlg[SW_DIV3].ob_spec.index = 0x00001171L;
 
-    set_obj(sw_dlg, SW_LBL_DRIVES, G_STRING, NONE, NORMAL, xl, ylbldrv, 16*cw, rh);
-    sw_dlg[SW_LBL_DRIVES].ob_spec.free_string = "Drives";
+    set_obj(sw_dlg, SW_DRIVE_HEADER, G_STRING, NONE, NORMAL, xl, ylbldrv, SW_LINE_COLS*cw, rh);
+    sw_dlg[SW_DRIVE_HEADER].ob_spec.free_string = sw_drive_header;
 
     for (i = 0; i < SW_NUM_DRIVE_LINES; i++) {
         int ry = ydrv0 + i * pitch;
-        set_obj(sw_dlg, SW_DRIVE_LINE(i), G_STRING, NONE, NORMAL, xl, ry, 40*cw, rh);
+        set_obj(sw_dlg, SW_DRIVE_LINE(i), G_STRING, NONE, NORMAL, xl, ry, SW_LINE_COLS*cw, rh);
         sw_dlg[SW_DRIVE_LINE(i)].ob_spec.free_string = sw_drive_line[i];
     }
+
+    set_obj(sw_dlg, SW_DRIVE_MORE, G_STRING, NONE, NORMAL, xl,
+            ydrv0 + SW_NUM_DRIVE_LINES * pitch, SW_LINE_COLS*cw, rh);
+    sw_dlg[SW_DRIVE_MORE].ob_spec.free_string = sw_drive_more;
 
     set_obj(sw_dlg, SW_DIV4, G_BOX, NONE, NORMAL, cw, ydiv4, DW - 2*cw, 2);
     sw_dlg[SW_DIV4].ob_spec.index = 0x00001171L;
@@ -2961,34 +3016,68 @@ static void sw_dialog_init(void)
     (void)sx; (void)sy; (void)ssw; (void)bw; (void)bh;
 }
 
-/* Left-justifies label in a 13-column field ("TNFS server:", the
- * longest label, is exactly 12 chars + this pads one trailing space),
- * so every value in the Network section starts at the same column 14,
- * regardless of which label it follows. */
-static void sw_set_net_line(int idx, const char *label, const char *value)
+/* Left-justifies label in an SW_LABEL_COLS field, so every value in the
+ * window starts in the same column whichever label it follows. The value
+ * is bounded to what is left of the line, so a long value can never run
+ * past the object and over its neighbours. */
+static void sw_set_labelled_line(char *dst, const char *label, const char *value)
 {
-    sprintf(sw_net_line[idx], "%-13s%.34s", label, value);
-    sw_net_line[idx][SW_LINE_BUF - 1] = '\0';
+    sprintf(dst, "%-*s%.*s", SW_LABEL_COLS, label, SW_LINE_COLS - SW_LABEL_COLS, value);
+    dst[SW_LINE_BUF - 1] = '\0';
+}
+
+/* Renders the IP line's value into `out` (at least 32 bytes).
+ *
+ * In DHCP mode the address the Pico actually got is NOT available to this
+ * program: the firmware keeps it in network.c's `current_ip` and only ever
+ * prints it to the debug UART. GET_NETWORK_CONFIG returns the STORED
+ * configuration (sys.ip_address), which in DHCP mode is the unused
+ * static-IP field -- passing that off as the active address would be a
+ * plain lie. So DHCP says who assigns the address instead of pretending
+ * to know it.
+ *
+ * In static mode the stored address is the one the Pico uses, so it is
+ * shown as-is. The Network line above already reports whether the link is
+ * actually up, so this line does not need to hedge about that too. */
+static void sw_format_ip_value(const NetConfig *net, char *out)
+{
+    if (net->ip_mode == NETCONFIG_MODE_DHCP)
+        strcpy(out, "Set by DHCP server");
+    else if (net->ip_address[0] != '\0')
+        sprintf(out, "%.28s", net->ip_address);
+    else
+        strcpy(out, "-");
 }
 
 /* Reads only g_netconfig (the one-time network_startup_load() result,
- * kept current afterwards by the CONFIG editor) and *cfg (the local
- * DriveConfig, for the TNFS server line) -- never calls
- * sidetnfs_probe_get_network_config() itself. GET_NETWORK_CONFIG/0x0413
- * is sent exactly once per session, in network_startup_load(). */
+ * kept current afterwards by the CONFIG editor) plus the live link
+ * status long -- never calls sidetnfs_probe_get_network_config() itself.
+ * GET_NETWORK_CONFIG/0x0413 is sent exactly once per session, in
+ * network_startup_load(). */
 static void status_refresh_network(const DriveConfig *cfg)
 {
-    int i;
-    int tnfs_count = 0;
-    const Drive *first_tnfs = 0;
     char value[40];
+    int link_connected;
 
-    /* "Configured" only means the saved configuration was read
-     * successfully -- 0x0413 returns stored config, not a live Wi-Fi
-     * association proof, so this is deliberately never "Connected". */
+    (void)cfg; /* TNFS servers belong to the drive list, not to network status */
+
+    link_connected = (sidetnfs_probe_get_network_link_state() == SIDETNFS_NET_LINK_CONNECTED);
+
+    /* The link state comes from GEMDRVEMUL_NETWORK_STATUS, the same
+     * status long the GEMDRIVE ROM waits on during boot, so "Connected"
+     * is real evidence that WiFi came up -- never inferred from the
+     * stored settings. GET_NETWORK_CONFIG (0x0413) only proves the saved
+     * configuration could be read, which is why its own outcome is
+     * reported first: without a firmware answer at all there is nothing
+     * to say about the link either. */
     switch (g_netconfig_load_state) {
     case NETLOAD_OK:
-        strncpy(value, "Configured", sizeof(value) - 1);
+        if (link_connected)
+            strncpy(value, "Connected", sizeof(value) - 1);
+        else if (g_netconfig.ssid[0] == '\0')
+            strncpy(value, "Not configured", sizeof(value) - 1);
+        else
+            strncpy(value, "Not connected", sizeof(value) - 1);
         break;
     case NETLOAD_BAD_STATUS:
         strncpy(value, netconfig_status_text(g_netconfig_load_fw_status), sizeof(value) - 1);
@@ -2999,101 +3088,257 @@ static void status_refresh_network(const DriveConfig *cfg)
         break;
     }
     value[sizeof(value) - 1] = '\0';
-    sw_set_net_line(0, "Status:", value);
+    sw_set_labelled_line(sw_net_line[0], "Network:", value);
 
     /* SSID only -- the password is never shown here. */
-    sw_set_net_line(1, "SSID:", (g_netconfig.ssid[0] != '\0') ? g_netconfig.ssid : "-");
+    sw_set_labelled_line(sw_net_line[1], "SSID:",
+                         (g_netconfig.ssid[0] != '\0') ? g_netconfig.ssid : "-");
 
-    /* DHCP mode shows "DHCP", not the stored static-IP field -- the
-     * actual DHCP-assigned address is unknown to this protocol. */
-    if (g_netconfig.ip_mode == NETCONFIG_MODE_DHCP)
-        sw_set_net_line(2, "IP address:", "DHCP");
-    else
-        sw_set_net_line(2, "IP address:", (g_netconfig.ip_address[0] != '\0') ? g_netconfig.ip_address : "-");
+    sw_format_ip_value(&g_netconfig, value);
+    sw_set_labelled_line(sw_net_line[2], "IP:", value);
+}
 
-    /* TNFS server comes from the local DriveConfig, not g_netconfig --
-     * no firmware command sent for this line either. Only ENABLED slots
-     * count: a DISABLED TNFS drive is stored but not actually active. */
-    for (i = 0; i < MAX_DRIVES; i++) {
-        if (drive_slot_is_enabled(&cfg->drives[i]) && cfg->drives[i].type == DRIVE_TYPE_TNFS) {
-            if (tnfs_count == 0)
-                first_tnfs = &cfg->drives[i];
-            tnfs_count++;
-        }
-    }
-    if (tnfs_count == 0) {
-        sw_set_net_line(3, "TNFS server:", "-");
+/* GEMDOS Tgetdate(): bits 0-4 day (1-31), bits 5-8 month (1-12),
+ * bits 9-15 year counted from 1980. */
+static void gemdos_decode_date(unsigned short packed, int *year, int *month, int *day)
+{
+    *day   = (int)(packed & 0x1FU);
+    *month = (int)((packed >> 5) & 0x0FU);
+    *year  = 1980 + (int)((packed >> 9) & 0x7FU);
+}
+
+/* GEMDOS Tgettime(): bits 0-4 seconds in TWO-second steps, bits 5-10
+ * minutes (0-59), bits 11-15 hours (0-23). The doubling is why the
+ * seconds field only ever shows even values. */
+static void gemdos_decode_time(unsigned short packed, int *hour, int *minute, int *second)
+{
+    *second = (int)((packed & 0x1FU) * 2U);
+    *minute = (int)((packed >> 5) & 0x3FU);
+    *hour   = (int)((packed >> 11) & 0x1FU);
+}
+
+/* Renders the Atari clock into `out` (at least SW_CLOCK_TEXT_BUF bytes).
+ * `field_chars` is what the laid-out field can actually hold, so a field
+ * too narrow for the full form falls back to time only rather than being
+ * clipped mid-string. Always writes exactly field_chars characters when
+ * it writes anything, so a shrinking value can never leave part of the
+ * previous one behind. */
+static void gemdos_format_clock(unsigned short date, unsigned short time, int field_chars, char *out)
+{
+    int year, month, day, hour, minute, second;
+
+    if (field_chars >= SW_CLOCK_FULL_CHARS) {
+        gemdos_decode_date(date, &year, &month, &day);
+        gemdos_decode_time(time, &hour, &minute, &second);
+        sprintf(out, "%02d-%02d-%04d %02d:%02d:%02d", day, month, year, hour, minute, second);
+    } else if (field_chars >= SW_CLOCK_SHORT_CHARS) {
+        gemdos_decode_time(time, &hour, &minute, &second);
+        sprintf(out, "%02d:%02d:%02d", hour, minute, second);
     } else {
-        if (tnfs_count == 1)
-            sprintf(value, "%.28s:%d", first_tnfs->host, first_tnfs->port);
-        else
-            sprintf(value, "%.20s +%d", first_tnfs->host, tnfs_count - 1);
-        sw_set_net_line(3, "TNFS server:", value);
+        out[0] = '\0';
     }
 }
 
-/* Fase AC-6: placeholder -- RTC settings/status follow in a separate
- * phase, per "Not doen". */
+/* Reads the Atari's own system clock -- never the Pico's. What this shows
+ * is the time the Atari actually has, which is the point: it is how the
+ * user sees whether the boot-time clock hand-off worked. */
+static void status_refresh_clock_text(void)
+{
+    gemdos_format_clock((unsigned short)Tgetdate(), (unsigned short)Tgettime(),
+                        sw_clock_field_chars, sw_clock_now);
+}
+
+/* Re-renders the clock and reports whether the text actually changed, so
+ * a tick that lands inside the same GEMDOS two-second step redraws
+ * nothing at all. */
+static int status_clock_tick(void)
+{
+    char previous[SW_CLOCK_TEXT_BUF];
+
+    strcpy(previous, sw_clock_now);
+    status_refresh_clock_text();
+    return strcmp(previous, sw_clock_now) != 0;
+}
+
+/* Never inferred: SIDETNFS_RTC_SYNC_SYNCED is only ever returned when the
+ * Pico explicitly published a synchronised clock this boot. */
+static const char *rtc_sync_text(int state)
+{
+    switch (state) {
+    case SIDETNFS_RTC_SYNC_SYNCED:   return "Synchronized";
+    case SIDETNFS_RTC_SYNC_DISABLED: return "Disabled";
+    case SIDETNFS_RTC_SYNC_NOT_SYNCED:
+    default:                          return "Not synchronized";
+    }
+}
+
+/* Renders the stored whole-hour UTC offset ("0", "+1", "-5") as
+ * "UTC+00:00" / "UTC+01:00" / "UTC-05:00". Returns 0 for anything the
+ * firmware would not have accepted, so the caller can fall back to "-"
+ * rather than show a made-up zone. Whole hours are all the firmware
+ * stores and all it applies -- there is no zone name and no DST here to
+ * render. */
+static int format_utc_offset(const char *offset, char *out)
+{
+    const char *p = offset;
+    int sign = 1;
+    int value = 0;
+    int digits = 0;
+
+    if (p == 0 || *p == '\0')
+        return 0;
+
+    if (*p == '+') {
+        p++;
+    } else if (*p == '-') {
+        sign = -1;
+        p++;
+    }
+
+    while (*p >= '0' && *p <= '9') {
+        value = value * 10 + (*p - '0');
+        p++;
+        digits++;
+        if (digits > 2)
+            return 0;
+    }
+    if (digits == 0 || *p != '\0')
+        return 0;
+
+    /* Same range the firmware's own parse_utc_offset() accepts. */
+    if (sign > 0 ? (value > 14) : (value > 12))
+        return 0;
+
+    sprintf(out, "UTC%c%02d:00", (sign < 0) ? '-' : '+', value);
+    return 1;
+}
+
+/* NTP comes from the live status the Pico publishes; Timezone comes from
+ * the stored RTC configuration g_rtcconfig already holds (GET_RTC_CONFIG,
+ * sent once in rtc_startup_load()). No new command is sent from here. */
 static void status_refresh_clock(void)
 {
-    strncpy(sw_clock_line[0], "NTP: Not synchronized", SW_LINE_BUF - 1); sw_clock_line[0][SW_LINE_BUF - 1] = '\0';
-    strncpy(sw_clock_line[1], "Timezone: -",           SW_LINE_BUF - 1); sw_clock_line[1][SW_LINE_BUF - 1] = '\0';
+    char tz[32];
+    char value[SW_LINE_BUF];
+
+    if (!format_utc_offset(g_rtcconfig.utc_offset, tz))
+        strcpy(tz, "-");
+
+    /* Both on one line. The longest form,
+     * "Not synchronized  TZ: UTC+01:00", is 31 characters, which is what
+     * the SW_LINE_COLS - SW_LABEL_COLS budget below has to hold. */
+    sprintf(value, "%-16s  TZ: %s", rtc_sync_text(sidetnfs_probe_get_rtc_sync_state()), tz);
+    sw_set_labelled_line(sw_clock_ntp, "NTP:", value);
+
+    status_refresh_clock_text();
 }
 
-/* Real data from the existing DriveConfig model. Line 0 is the
- * unambiguous configured/active/inactive/empty summary (AtariConfig-3,
- * section 8: "Active drives" must count ENABLED slots only); line 1 is
- * the SETTINGS disk, which is always active and never one of the eight
- * ordinary slots; the remaining lines list only ENABLED drives (a
- * DISABLED one is stored but not actually active), capped at
- * SW_NUM_DRIVE_LINES with an overflow note on the last line rather than
- * silently dropping entries -- DRIVES still shows every slot. */
-static void status_refresh_drives(const DriveConfig *cfg)
+/* One row of the active-drive list, laid out across the full
+ * SW_LINE_COLS: letter, then the name, then the backend flush right.
+ *
+ *   col 0..1   "N:"
+ *   col 2..3   two spaces
+ *   col 4..    name, truncated to SW_DRV_NAME_COLS
+ *   last 8     backend, right-aligned
+ *
+ * The name field is a fixed width with a precision, so an over-long name
+ * is cut rather than pushing the backend out of view, and a short one is
+ * padded so the backend always lands in the same column. */
+#define SW_DRV_NAME_COL     4
+#define SW_DRV_BACKEND_COLS 8 /* "SETTINGS", the longest backend name */
+#define SW_DRV_NAME_COLS    (SW_LINE_COLS - SW_DRV_NAME_COL - SW_DRV_BACKEND_COLS - 1)
+
+static void sw_format_drive_row(char *dst, char letter, const char *name, const char *backend)
 {
-    int i;
-    int line;
-    int configured = drive_config_configured_count(cfg);
-    int enabled    = drive_config_enabled_count(cfg);
-    int empty      = drive_config_empty_count(cfg);
-    int shown, overflow, remaining;
+    if (name == 0 || name[0] == '\0')
+        name = "(unnamed)";
 
-    sprintf(sw_drive_line[0], "Configured:%d Active:%d Inactive:%d Empty:%d",
-            configured, enabled, configured - enabled, empty);
-    sprintf(sw_drive_line[1], "Settings disk: %c: (always active)", cfg->settings_letter);
+    sprintf(dst, "%c:  %-*.*s %*s", letter,
+            SW_DRV_NAME_COLS, SW_DRV_NAME_COLS, name,
+            SW_DRV_BACKEND_COLS, backend);
+    dst[SW_LINE_BUF - 1] = '\0';
+}
 
-    remaining = SW_NUM_DRIVE_LINES - 2;
+/* Collects every drive that is actually published as a GEMDOS drive: the
+ * ENABLED ordinary slots plus the SETTINGS disk, which is always active.
+ * A DISABLED slot is stored but never published, so it is not listed.
+ * Slots keep their fixed indices and are never sorted in the model, so
+ * the ascending order is produced here, by drive letter, without
+ * reordering anything the rest of the program relies on.
+ *
+ * Returns the number collected; fills up to `max` entries. A TNFS drive
+ * currently serving NET_ERR.TXT is published like any other and is
+ * therefore listed like any other -- its backend does not change. */
+typedef struct {
+    char letter;
+    const char *name;
+    const char *backend;
+} SwDriveRow;
 
-    if (enabled == 0) {
-        strncpy(sw_drive_line[2], "No active drives", SW_LINE_BUF - 1);
-        sw_drive_line[2][SW_LINE_BUF - 1] = '\0';
-        for (line = 3; line < SW_NUM_DRIVE_LINES; line++)
-            sw_drive_line[line][0] = '\0';
-        return;
-    }
+static int sw_collect_active_drives(const DriveConfig *cfg, SwDriveRow *out, int max)
+{
+    int i, j, count = 0;
+    SwDriveRow all[MAX_DRIVES + 1];
 
-    overflow = enabled > remaining;
-    shown = overflow ? (remaining - 1) : enabled;
-
-    line = 2;
-    for (i = 0; i < MAX_DRIVES && (line - 2) < shown; i++) {
+    for (i = 0; i < MAX_DRIVES; i++) {
         const Drive *d = &cfg->drives[i];
-        const char *type_abbrev;
-
         if (!drive_slot_is_enabled(d))
             continue;
-
-        type_abbrev = (d->type == DRIVE_TYPE_TNFS) ? "TNFS" : "SD";
-        sprintf(sw_drive_line[line], "%c:  %-30.30s%4s", d->letter, d->nickname, type_abbrev);
-        line++;
+        all[count].letter  = d->letter;
+        all[count].name    = d->nickname;
+        all[count].backend = (d->type == DRIVE_TYPE_TNFS) ? "TNFS" : "SD";
+        count++;
     }
 
-    if (overflow) {
-        sprintf(sw_drive_line[line], "...and %d more (see Drives)", enabled - shown);
-        line++;
+    /* The SETTINGS disk is an ordinary row in this list, not a line of
+     * its own any more. */
+    all[count].letter  = cfg->settings_letter;
+    all[count].name    = "Settings";
+    all[count].backend = "SETTINGS";
+    count++;
+
+    /* Insertion sort by letter: at most nine entries, and it keeps the
+     * caller free of any assumption that the letters are contiguous. */
+    for (i = 1; i < count; i++) {
+        SwDriveRow key = all[i];
+        for (j = i - 1; j >= 0 && all[j].letter > key.letter; j--)
+            all[j + 1] = all[j];
+        all[j + 1] = key;
     }
 
-    for (; line < SW_NUM_DRIVE_LINES; line++)
-        sw_drive_line[line][0] = '\0';
+    for (i = 0; i < count && i < max; i++)
+        out[i] = all[i];
+
+    return count;
+}
+
+/* Header carries the total number of published drives, right-aligned on
+ * the same line; the rows below show at most SW_NUM_DRIVE_LINES of them,
+ * with the remainder acknowledged rather than silently dropped. */
+static void status_refresh_drives(const DriveConfig *cfg)
+{
+    SwDriveRow rows[SW_NUM_DRIVE_LINES];
+    int total, shown, i;
+    char count_text[8];
+
+    total = sw_collect_active_drives(cfg, rows, SW_NUM_DRIVE_LINES);
+    shown = (total < SW_NUM_DRIVE_LINES) ? total : SW_NUM_DRIVE_LINES;
+
+    sprintf(count_text, "%d", total);
+    sprintf(sw_drive_header, "%-*s%*s",
+            SW_LINE_COLS - (int)strlen(count_text), "Active drives:",
+            (int)strlen(count_text), count_text);
+    sw_drive_header[SW_LINE_BUF - 1] = '\0';
+
+    for (i = 0; i < shown; i++)
+        sw_format_drive_row(sw_drive_line[i], rows[i].letter, rows[i].name, rows[i].backend);
+    for (; i < SW_NUM_DRIVE_LINES; i++)
+        sw_drive_line[i][0] = '\0';
+
+    if (total > shown)
+        sprintf(sw_drive_more, "(and %d more)", total - shown);
+    else
+        sw_drive_more[0] = '\0';
 }
 
 /* Updates all three status sections' text buffers. Does not redraw --
@@ -3104,6 +3349,86 @@ static void status_window_refresh(const DriveConfig *cfg)
     status_refresh_network(cfg);
     status_refresh_clock();
     status_refresh_drives(cfg);
+}
+
+/* Repaints only the clock field: the root is drawn with the clip
+ * rectangle narrowed to that one object, so the AES repaints its
+ * background and the string within it and touches nothing else. That
+ * keeps the update flicker-free and, because the background is repainted
+ * too, guarantees no part of the previous time can survive. */
+static void sw_redraw_clock(void)
+{
+    short ox, oy;
+
+    if (sw_clock_field_chars <= 0)
+        return;
+
+    objc_offset(sw_dlg, SW_CLOCK_NOW, &ox, &oy);
+    objc_draw(sw_dlg, SW_ROOT, MAX_DEPTH, ox, oy,
+              sw_dlg[SW_CLOCK_NOW].ob_width, sw_dlg[SW_CLOCK_NOW].ob_height);
+}
+
+/* form_do() has no timer hook, so the status window runs the equivalent
+ * evnt_multi() loop itself. Behaviour matches form_do() for this window:
+ * TOUCHEXIT buttons fire on mouse-down and Return activates the DEFAULT
+ * button. It is a plain form_dial()-style modal with no editable fields,
+ * so none of form_do()'s text-cursor handling applies here.
+ *
+ * MU_TIMER only refreshes the clock. The loop always returns to
+ * evnt_multi() immediately afterwards, so the AES event loop is never
+ * blocked and redraw/clipping stays the AES's own business. */
+static short sw_form_do_ticking(void)
+{
+    short mx, my, mb, ks, kr, br;
+    short msg[8];
+    short event, obj, next;
+    short result = SW_QUIT;
+    int running = 1;
+
+    while (running) {
+        /* gemlib takes the timer interval as a single unsigned long, and
+         * returns OutX/OutY/ButtonState/KeyState/Key/ReturnCount in that
+         * order -- `kr` is the key code, `br` the click count. */
+        event = evnt_multi(MU_KEYBD | MU_BUTTON | MU_TIMER | MU_MESAG,
+                           2, 1, 1,
+                           0, 0, 0, 0, 0,
+                           0, 0, 0, 0, 0,
+                           msg,
+                           (unsigned long)SW_CLOCK_TICK_MS,
+                           &mx, &my, &mb, &ks, &kr, &br);
+
+        if (event & MU_TIMER) {
+            if (status_clock_tick())
+                sw_redraw_clock();
+        }
+
+        if (event & MU_BUTTON) {
+            obj = objc_find(sw_dlg, SW_ROOT, MAX_DEPTH, mx, my);
+            if (obj > 0) {
+                next = obj;
+                if (!form_button(sw_dlg, obj, br, &next)) {
+                    result = (short)(next & 0x7FFF);
+                    running = 0;
+                    /* Leave the button unpressed, so the full redraw the
+                     * caller does after the action does not show it stuck
+                     * in its selected state. */
+                    if (result > 0 && result < SW_NOBJS)
+                        sw_dlg[result].ob_state &= (unsigned short)(~SELECTED);
+                }
+            }
+        }
+
+        if (event & MU_KEYBD) {
+            /* No editable fields here, so the only key that does
+             * anything is Return/Enter on the DEFAULT button. */
+            if ((kr & 0x00FF) == 0x0D) {
+                result = SW_SAVE;
+                running = 0;
+            }
+        }
+    }
+
+    return result;
 }
 
 /* ================================================================== */
@@ -3146,7 +3471,7 @@ void dialog_run(DriveConfig *cfg)
 
     done = 0;
     while (!done) {
-        which = (short)(form_do(sw_dlg, SW_ROOT) & 0x7FFF);
+        which = sw_form_do_ticking();
         wait_mouse_release();
 
         switch (which) {
