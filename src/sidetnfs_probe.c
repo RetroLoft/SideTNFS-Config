@@ -7,7 +7,9 @@
  * GET_RTC_CONFIG (0x0416), SET_RTC_CONFIG (0x0417), SAVE_RTC_CONFIG
  * (0x0418), plus (Fase 9B) REBOOT_PICO (0x041B, GEMDRVEMUL_REBOOT_PICO --
  * no relation to the SIDETNFS config sub-protocol/version, a plain
- * GEMDRVEMUL command like PING). Command numbers, offsets and payload shapes are unchanged
+ * GEMDRVEMUL command like PING), plus CHECK_UPDATE (0x041C,
+ * GEMDRVEMUL_SIDETNFS_CHECK_UPDATE -- likewise a plain GEMDRVEMUL command,
+ * not part of the config sub-protocol/version either). Command numbers, offsets and payload shapes are unchanged
  * since protocol v2; AtariConfig Fase 3 (Pico Fase 12B) bumped the
  * protocol version itself to 3 because the drive record's DRIVE_STATE
  * field (formerly DRIVE_USED) now carries a three-value
@@ -95,6 +97,7 @@
 #define CMD_SET_RTC_CONFIG      0x0417UL
 #define CMD_SAVE_RTC_CONFIG     0x0418UL
 #define CMD_REBOOT_PICO         0x041BUL /* Fase 9B: APP_GEMDRVEMUL<<8 | 0x1B, commands.h */
+#define CMD_CHECK_UPDATE        0x041CUL /* APP_GEMDRVEMUL<<8 | 0x1C, commands.h */
 
 #define RANDOM_TOKEN_OFFSET      0x0000UL /* echoed token, polled after completion */
 #define RANDOM_TOKEN_SEED_OFFSET 0x0004UL /* Pico-published seed, read before sending */
@@ -206,8 +209,23 @@ _Static_assert(RTC_BLOCK_END <= 0x10000UL, "RTC block must fit the 64KB ROM3 win
 #define SET_RTC_CONFIG_PAYLOAD_BYTES \
     (2UL + (unsigned long)SIDETNFS_RTC_NTP_SERVER_LEN + (unsigned long)SIDETNFS_RTC_UTC_OFFSET_LEN)
 
+/* CHECK_UPDATE block immediately follows the RTC block, same
+ * ALIGN4(prev block end) placement gemdrvemul.h's own
+ * GEMDRVEMUL_SIDETNFS_UPDATE uses. */
+#define UPDATE_BASE_UNALIGNED     RTC_BLOCK_END
+#define UPDATE_STATUS_OFFSET      SIDETNFS_NETWORK_ALIGN4(UPDATE_BASE_UNALIGNED) /* uint32_t, swapped long */
+#define UPDATE_LATEST_OFFSET      (UPDATE_STATUS_OFFSET + 4UL)                   /* char[SIDETNFS_UPDATE_VERSION_LEN] */
+#define UPDATE_INSTALLED_OFFSET   (UPDATE_LATEST_OFFSET + (unsigned long)SIDETNFS_UPDATE_VERSION_LEN) /* char[SIDETNFS_UPDATE_VERSION_LEN] */
+#define UPDATE_BLOCK_END          (UPDATE_INSTALLED_OFFSET + (unsigned long)SIDETNFS_UPDATE_VERSION_LEN)
+
+_Static_assert((UPDATE_STATUS_OFFSET & 3UL) == 0UL, "UPDATE_STATUS_OFFSET must be 4-byte aligned");
+_Static_assert((UPDATE_LATEST_OFFSET & 1UL) == 0UL, "UPDATE_LATEST_OFFSET must be 2-byte aligned");
+_Static_assert((UPDATE_INSTALLED_OFFSET & 1UL) == 0UL, "UPDATE_INSTALLED_OFFSET must be 2-byte aligned");
+_Static_assert(UPDATE_BLOCK_END <= 0x10000UL, "CHECK_UPDATE block must fit the 64KB ROM3 window");
+
 #define PROBE_TIMEOUT_SEC      2
 #define SAVE_CONFIG_TIMEOUT_SEC 5 /* SAVE_CONFIG does real flash erase+program */
+#define UPDATE_CHECK_TIMEOUT_SEC 20 /* DNS + TLS handshake + HTTP GET on the Pico side, budgeted 15s there */
 #define PAL_VBLS_PER_SEC       50 /* Assuming PAL system, as in helper.c */
 
 static unsigned char rom3_read(unsigned long offset)
@@ -496,6 +514,29 @@ int sidetnfs_probe_save_rtc_config(unsigned long *out_status)
         return SIDETNFS_PROBE_TIMEOUT;
 
     *out_status = rom3_read_long(RTC_STATUS_OFFSET);
+    return SIDETNFS_PROBE_OK;
+}
+
+/* No request payload. UPDATE_CHECK_TIMEOUT_SEC covers the Pico's own
+ * bounded DNS+TLS+HTTP round-trip (15s, sidetnfs_update_check.c) plus
+ * margin -- a real "no update"/"update available" result and a genuine
+ * timeout (offline, DNS failure, TLS failure, no firmware at all) both
+ * come back through this same SIDETNFS_PROBE_TIMEOUT path, since the
+ * firmware itself never leaves the token unwritten on its own internal
+ * errors (see sidetnfs_update_check_run()'s SIDETNFS_UPDATE_STATUS_ERROR
+ * path, which still ACKs). A SIDETNFS_PROBE_TIMEOUT here specifically
+ * means the request never reached the firmware at all (older firmware
+ * that doesn't recognize 0x041C, or no firmware/no cartridge). */
+int sidetnfs_probe_check_update(SideTnfsUpdateCheck *info)
+{
+    unsigned long seed = send_command_start(CMD_CHECK_UPDATE, 0UL);
+
+    if (!wait_for_token(seed, UPDATE_CHECK_TIMEOUT_SEC))
+        return SIDETNFS_PROBE_TIMEOUT;
+
+    info->status = rom3_read_long(UPDATE_STATUS_OFFSET);
+    read_string_field(UPDATE_LATEST_OFFSET, info->latest_version, SIDETNFS_UPDATE_VERSION_LEN);
+    read_string_field(UPDATE_INSTALLED_OFFSET, info->installed_version, SIDETNFS_UPDATE_VERSION_LEN);
     return SIDETNFS_PROBE_OK;
 }
 

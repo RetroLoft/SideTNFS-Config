@@ -169,6 +169,28 @@ int sidetnfs_probe_get_rtc_config(SideTnfsRtcConfig *info);
 int sidetnfs_probe_set_rtc_config(const SideTnfsRtcConfig *in, unsigned long *out_status);
 int sidetnfs_probe_save_rtc_config(unsigned long *out_status);
 
+/* Firmware-update version check (GEMDRVEMUL_SIDETNFS_CHECK_UPDATE,
+ * 0x041C). Fetches version.txt from the SideTNFS-Firmware GitHub repo
+ * (TLS, on the Pico side) and compares it against the firmware's own
+ * build-time version. Field lengths/status values match
+ * sd2tnfs/romemul/include/sidetnfs_update_check.h exactly. Blocking, up
+ * to UPDATE_CHECK_TIMEOUT_SEC (sidetnfs_probe.c) -- comfortably longer
+ * than the Pico's own internal budget for the whole DNS+TLS+HTTP
+ * round-trip. */
+#define SIDETNFS_UPDATE_VERSION_LEN 16
+
+#define SIDETNFS_UPDATE_STATUS_UP_TO_DATE 0
+#define SIDETNFS_UPDATE_STATUS_AVAILABLE  1
+#define SIDETNFS_UPDATE_STATUS_ERROR      2
+
+typedef struct {
+    unsigned long status; /* only meaningful after a SIDETNFS_PROBE_OK communication result */
+    char latest_version[SIDETNFS_UPDATE_VERSION_LEN];    /* e.g. "v1.0.2" -- empty on ERROR */
+    char installed_version[SIDETNFS_UPDATE_VERSION_LEN]; /* this firmware's own build-time version, e.g. "v1.0.1" */
+} SideTnfsUpdateCheck;
+
+int sidetnfs_probe_check_update(SideTnfsUpdateCheck *info);
+
 /* Live RTC/NTP synchronisation state, as opposed to the stored settings
  * GET_RTC_CONFIG returns. Read straight from the two status longs the
  * Pico publishes in the ROM3 exchange area and the GEMDRIVE ROM already

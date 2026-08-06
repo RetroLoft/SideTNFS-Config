@@ -112,6 +112,30 @@ enum {
 };
 
 /* ================================================================== */
+/* Firmware update notice (UPD_*)                                      */
+/* Shown automatically at startup (dialog_run(), only when real         */
+/* firmware answered) when sidetnfs_probe_check_update() reports        */
+/* SIDETNFS_UPDATE_STATUS_AVAILABLE. Info only -- a single OK button,   */
+/* no fields to edit, nothing written back to the firmware. "Up to      */
+/* date" and any check failure (offline, older firmware, timeout) both  */
+/* stay completely silent -- this dialog exists to be seen only when    */
+/* there is actually something to act on.                               */
+/* ================================================================== */
+enum {
+    UPD_ROOT = 0,
+    UPD_TITLE,
+    UPD_DIV1,
+    UPD_LINE1,
+    UPD_LINE2,
+    UPD_LINE3,
+    UPD_LINE4,
+    UPD_LINE5,
+    UPD_DIV2,
+    UPD_OK,
+    UPD_NOBJS
+};
+
+/* ================================================================== */
 /* WiFi/network settings editor (NC_*)                                 */
 /* Fase AC-5: local UI state only -- see netconfig.h. Country is a      */
 /* plain two-letter code field, validated and uppercased on OK (see     */
@@ -209,6 +233,7 @@ static OBJECT sd_dlg[SD_NOBJS];
 static OBJECT te_dlg[TE_NOBJS];
 static OBJECT nc_dlg[NC_NOBJS];
 static OBJECT rc_dlg[RC_NOBJS];
+static OBJECT upd_dlg[UPD_NOBJS];
 static OBJECT ov_dlg[OV_NOBJS];
 static OBJECT sw_dlg[SW_NOBJS];
 
@@ -372,6 +397,12 @@ static char ov_settings_val[OV_SETTINGS_BUF];
 /* "Network: ", "SSID:    ", "IP:      ", "Clock:   ", "NTP:     " all put
  * their value in the same column. */
 #define SW_LABEL_COLS 9
+
+/* "SIDETNFS Configuration" plus an optional " vX.Y.Z" suffix (see
+ * g_installed_version above) -- 23 chars + 1 space + up to
+ * SIDETNFS_UPDATE_VERSION_LEN (16), rounded up with room to spare. */
+#define SW_TITLE_BUF 48
+static char sw_title_buf[SW_TITLE_BUF];
 
 static char sw_net_line[3][SW_LINE_BUF];
 static char sw_clock_ntp[SW_LINE_BUF];
@@ -2157,6 +2188,146 @@ static void rtc_editor_run(RtcConfig *rc)
 }
 
 /* ================================================================== */
+/* Firmware update notice (UPD_*)                                      */
+/* Plain info dialog, same G_STRING-per-line idiom the status window's  */
+/* own multi-line sections already use -- deliberately NOT a
+ * form_alert(): form_alert()'s classic 3-line/40-char-per-line budget
+ * has no room for "installed vs. latest" plus a two-line URL without
+ * truncating something a user actually needs to read. */
+/* ================================================================== */
+#define UPD_LINE_BUF 56
+static char buf_upd_line2[UPD_LINE_BUF];
+
+/* This build's installed firmware version, as reported by the Pico over
+ * CMD_CHECK_UPDATE (see update_startup_check() below) -- filled in once
+ * at startup, empty if the check never got a response (no firmware,
+ * older firmware that doesn't know 0x041C, or offline). Read by
+ * sw_dialog_init() to show the version in the main window title, so
+ * that title reuses this same round-trip instead of asking the firmware
+ * a second time via a separate command. */
+static char g_installed_version[SIDETNFS_UPDATE_VERSION_LEN] = "";
+
+static void upd_dialog_init(void)
+{
+    short cw, ch, bw, bh;
+    short sx, sy, sw, sh;
+    int rh, tm, pitch;
+    int DW, DH, xl;
+    int yt, ydiv1, yline1, yline2, yline3, yline4, yline5, ydiv2, ybtn;
+
+    graf_handle(&cw, &ch, &bw, &bh);
+    wind_get(0, WF_WORKXYWH, &sx, &sy, &sw, &sh);
+    if (sh <= 0 || sh > 800) sh = 200;
+
+    rh    = (sh >= 350) ? (int)ch : ((ch > 8) ? ch / 2 : (int)ch);
+    tm    = (rh / 4 > 2) ? rh / 4 : 2;
+    pitch = rh + 3;
+
+    /* Widest line is the first half of the URL (49 chars) -- 52 columns
+     * gives it a little breathing room on both sides. */
+    DW = 52 * cw;
+    xl = 2 * cw;
+
+    yt     = tm;
+    ydiv1  = yt + rh + 1;
+    yline1 = ydiv1 + 5;
+    yline2 = yline1 + pitch;
+    yline3 = yline2 + pitch + pitch / 2; /* extra half-line gap before the URL */
+    yline4 = yline3 + pitch;
+    yline5 = yline4 + pitch;
+    ydiv2  = yline5 + pitch + 2;
+    ybtn   = ydiv2 + 7;
+    DH     = ybtn + rh + tm + 3;
+
+    set_obj(upd_dlg, UPD_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
+    upd_dlg[UPD_ROOT].ob_spec.index = 0x00031070L;
+
+    set_obj(upd_dlg, UPD_TITLE, G_STRING, NONE, NORMAL, 13*cw, yt, 26*cw, rh);
+    upd_dlg[UPD_TITLE].ob_spec.free_string = "Firmware Update Available";
+
+    set_obj(upd_dlg, UPD_DIV1, G_BOX, NONE, NORMAL, cw, ydiv1, DW - 2*cw, 2);
+    upd_dlg[UPD_DIV1].ob_spec.index = 0x00001171L;
+
+    set_obj(upd_dlg, UPD_LINE1, G_STRING, NONE, NORMAL, xl, yline1, DW - 4*cw, rh);
+    upd_dlg[UPD_LINE1].ob_spec.free_string = "A newer SideTNFS firmware version is available.";
+
+    set_obj(upd_dlg, UPD_LINE2, G_STRING, NONE, NORMAL, xl, yline2, DW - 4*cw, rh);
+    upd_dlg[UPD_LINE2].ob_spec.free_string = buf_upd_line2; /* filled in by upd_notice_run() */
+
+    set_obj(upd_dlg, UPD_LINE3, G_STRING, NONE, NORMAL, xl, yline3, DW - 4*cw, rh);
+    upd_dlg[UPD_LINE3].ob_spec.free_string = "For update instructions, see:";
+
+    set_obj(upd_dlg, UPD_LINE4, G_STRING, NONE, NORMAL, xl, yline4, DW - 4*cw, rh);
+    upd_dlg[UPD_LINE4].ob_spec.free_string = "https://github.com/RetroLoft/SideTNFS-Firmware/";
+
+    set_obj(upd_dlg, UPD_LINE5, G_STRING, NONE, NORMAL, xl, yline5, DW - 4*cw, rh);
+    upd_dlg[UPD_LINE5].ob_spec.free_string = "blob/main/UPDATE.md";
+
+    set_obj(upd_dlg, UPD_DIV2, G_BOX, NONE, NORMAL, cw, ydiv2, DW - 2*cw, 2);
+    upd_dlg[UPD_DIV2].ob_spec.index = 0x00001171L;
+
+    set_obj(upd_dlg, UPD_OK, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, (DW - 8*cw) / 2, ybtn, 8*cw, rh);
+    upd_dlg[UPD_OK].ob_spec.free_string = "   OK   ";
+
+    wire_tree(upd_dlg, UPD_NOBJS);
+
+    (void)sx; (void)sy; (void)sw; (void)bw; (void)bh;
+}
+
+/* installed/latest are both plain version strings (e.g. "v1.0.1"), never
+ * edited or written back anywhere -- display only. Blocks until OK. */
+static void upd_notice_run(const char *installed, const char *latest)
+{
+    short x, y, w, h;
+    short which;
+
+    sprintf(buf_upd_line2, "Installed: %-10s  Latest: %-10s", installed, latest);
+    buf_upd_line2[UPD_LINE_BUF - 1] = '\0';
+
+    upd_dialog_init();
+
+    form_center(upd_dlg, &x, &y, &w, &h);
+    form_dial(FMD_START, x, y, w, h, x, y, w, h);
+    objc_draw(upd_dlg, UPD_ROOT, MAX_DEPTH, x, y, w, h);
+
+    do {
+        which = (short)(form_do(upd_dlg, UPD_OK) & 0x7FFF);
+        wait_mouse_release();
+    } while (which != UPD_OK);
+
+    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+}
+
+/* Firmware-update check, run once at startup. Same silent-fallback shape
+ * as rtc_startup_load()/network_startup_load() above: no firmware, older
+ * firmware that doesn't know CMD_CHECK_UPDATE, or any network failure on
+ * the Pico side all come back as something other than
+ * (SIDETNFS_PROBE_OK, SIDETNFS_UPDATE_STATUS_AVAILABLE) and are ignored
+ * for the update notice, which is only ever shown when there is actually
+ * a newer version to report.
+ *
+ * info.installed_version is captured into g_installed_version whenever
+ * the firmware answered at all (SIDETNFS_PROBE_OK), regardless of the
+ * update-check outcome itself -- the firmware always fills that field in
+ * from its own RELEASE_VERSION (see gemdrvemul.c's CHECK_UPDATE case),
+ * so this is the one place that reads it, used by both the update
+ * notice above and sw_dialog_init()'s title below. */
+static void update_startup_check(void)
+{
+    SideTnfsUpdateCheck info;
+
+    if (sidetnfs_probe_check_update(&info) != SIDETNFS_PROBE_OK)
+        return;
+
+    strncpy(g_installed_version, info.installed_version, sizeof(g_installed_version) - 1);
+    g_installed_version[sizeof(g_installed_version) - 1] = '\0';
+
+    if (info.status == SIDETNFS_UPDATE_STATUS_AVAILABLE) {
+        upd_notice_run(info.installed_version, info.latest_version);
+    }
+}
+
+/* ================================================================== */
 /* WiFi/network settings editor (Fase AC-5)                            */
 /* UI only: no firmware read/write, no flash, no file. OK copies the   */
 /* edit buffers into *nc; Cancel (or ESC, see netconfig_editor_run())  */
@@ -2937,8 +3108,25 @@ static void sw_dialog_init(void)
     set_obj(sw_dlg, SW_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
     sw_dlg[SW_ROOT].ob_spec.index = 0x00031070L;
 
-    set_obj(sw_dlg, SW_TITLE, G_STRING, NONE, NORMAL, 10*cw, yt, 24*cw, rh);
-    sw_dlg[SW_TITLE].ob_spec.free_string = "SIDETNFS Configuration";
+    /* Version suffix: reuses g_installed_version, captured once at
+     * startup by update_startup_check() from the same CHECK_UPDATE
+     * round-trip the update-notice dialog uses -- no second command, no
+     * second source of truth. Left off entirely (falls back to the
+     * plain title) when that check never got a response. */
+    if (g_installed_version[0] != '\0') {
+        sprintf(sw_title_buf, "SIDETNFS Configuration %s", g_installed_version);
+        sw_title_buf[SW_TITLE_BUF - 1] = '\0';
+    } else {
+        strcpy(sw_title_buf, "SIDETNFS Configuration");
+    }
+    {
+        int title_chars = (int)strlen(sw_title_buf);
+        int title_x = ((DW / cw) - title_chars) / 2 * cw;
+
+        if (title_x < xl) title_x = xl;
+        set_obj(sw_dlg, SW_TITLE, G_STRING, NONE, NORMAL, title_x, yt, title_chars*cw, rh);
+        sw_dlg[SW_TITLE].ob_spec.free_string = sw_title_buf;
+    }
 
     set_obj(sw_dlg, SW_DIV1, G_BOX, NONE, NORMAL, cw, ydiv1, DW - 2*cw, 2);
     sw_dlg[SW_DIV1].ob_spec.index = 0x00001171L;
@@ -3461,6 +3649,11 @@ void dialog_run(DriveConfig *cfg)
      * fallback shape -- unsupported (older) firmware or no firmware at
      * all both just leave g_rtcconfig at its built-in defaults. */
     rtc_startup_load();
+
+    /* Firmware-update check: last of the startup probes, same
+     * silent-fallback shape. Shows a one-time notice dialog only when
+     * the firmware reports a newer version is available. */
+    update_startup_check();
 
     sw_dialog_init();
     status_window_refresh(cfg);
