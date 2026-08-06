@@ -225,7 +225,7 @@ _Static_assert(UPDATE_BLOCK_END <= 0x10000UL, "CHECK_UPDATE block must fit the 6
 
 #define PROBE_TIMEOUT_SEC      2
 #define SAVE_CONFIG_TIMEOUT_SEC 5 /* SAVE_CONFIG does real flash erase+program */
-#define UPDATE_CHECK_TIMEOUT_SEC 20 /* DNS + TLS handshake + HTTP GET on the Pico side, budgeted 15s there */
+#define UPDATE_CHECK_TIMEOUT_SEC 20 /* DNS + TCP connect + HTTP GET on the Pico side, budgeted 15s there */
 #define PAL_VBLS_PER_SEC       50 /* Assuming PAL system, as in helper.c */
 
 static unsigned char rom3_read(unsigned long offset)
@@ -518,9 +518,9 @@ int sidetnfs_probe_save_rtc_config(unsigned long *out_status)
 }
 
 /* No request payload. UPDATE_CHECK_TIMEOUT_SEC covers the Pico's own
- * bounded DNS+TLS+HTTP round-trip (15s, sidetnfs_update_check.c) plus
+ * bounded DNS+TCP+HTTP round-trip (15s, sidetnfs_update_check.c) plus
  * margin -- a real "no update"/"update available" result and a genuine
- * timeout (offline, DNS failure, TLS failure, no firmware at all) both
+ * timeout (offline, DNS failure, connect failure, no firmware at all) both
  * come back through this same SIDETNFS_PROBE_TIMEOUT path, since the
  * firmware itself never leaves the token unwritten on its own internal
  * errors (see sidetnfs_update_check_run()'s SIDETNFS_UPDATE_STATUS_ERROR

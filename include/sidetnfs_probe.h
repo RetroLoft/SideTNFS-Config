@@ -170,12 +170,12 @@ int sidetnfs_probe_set_rtc_config(const SideTnfsRtcConfig *in, unsigned long *ou
 int sidetnfs_probe_save_rtc_config(unsigned long *out_status);
 
 /* Firmware-update version check (GEMDRVEMUL_SIDETNFS_CHECK_UPDATE,
- * 0x041C). Fetches version.txt from the SideTNFS-Firmware GitHub repo
- * (TLS, on the Pico side) and compares it against the firmware's own
- * build-time version. Field lengths/status values match
+ * 0x041C). Fetches version.txt from retroloft.net (plain HTTP, on the
+ * Pico side) and compares it against the firmware's own build-time
+ * version. Field lengths/status values match
  * sd2tnfs/romemul/include/sidetnfs_update_check.h exactly. Blocking, up
  * to UPDATE_CHECK_TIMEOUT_SEC (sidetnfs_probe.c) -- comfortably longer
- * than the Pico's own internal budget for the whole DNS+TLS+HTTP
+ * than the Pico's own internal budget for the whole DNS+TCP+HTTP
  * round-trip. */
 #define SIDETNFS_UPDATE_VERSION_LEN 16
 
