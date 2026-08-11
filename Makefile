@@ -10,9 +10,10 @@ CFLAGS     = -Wall -Wextra -O1 -m68000 -fno-strict-aliasing \
 # -s : strip symbols from the final executable
 LDFLAGS    = -s -lgem
 
-TARGET     = SIDETNFS.PRG
-SRCS       = src/main.c src/drive.c src/netconfig.c src/rtcconfig.c src/dialog.c src/sidetnfs_probe.c
-INSTALLDIR = /mnt/retroloft/retro/Atari.ST/CONFIG
+TARGET      = SIDETNFS.PRG
+TARGET_DEMO = DEMOTNFS.PRG
+SRCS        = src/main.c src/drive.c src/netconfig.c src/rtcconfig.c src/dialog.c src/sidetnfs_probe.c
+INSTALLDIR  = /mnt/retroloft/retro/Atari.ST/CONFIG
 
 # Files to copy on 'make install' (extend as the project grows).
 # README.TXT ships on the SETTINGS disk alongside SIDETNFS.PRG and MUST
@@ -27,10 +28,17 @@ all: $(TARGET) install
 $(TARGET): $(SRCS)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS) $(LDFLAGS)
 
+# Demo build: DEMO_MODE guards every cartridge-communication call site in
+# dialog.c so DEMOTNFS.PRG never touches ROM3 at all -- for recording a
+# demo video in Hatari with no SideTNFS cartridge/Pico present. Unlike
+# 'all', this never installs: DEMOTNFS.PRG stays local to the project dir.
+demo: $(SRCS)
+	$(CC) $(CFLAGS) -DDEMO_MODE -o $(TARGET_DEMO) $(SRCS) $(LDFLAGS)
+
 install: $(DISTFILES)
 	cp -v $(DISTFILES) $(INSTALLDIR)/
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(TARGET_DEMO)
 
-.PHONY: all install clean
+.PHONY: all install clean demo

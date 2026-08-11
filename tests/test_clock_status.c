@@ -20,7 +20,9 @@
  *   - the right-alignment arithmetic sw_dialog_init() uses, at several
  *     window widths and character cell sizes;
  *   - rtc_sync_text(): every known state plus an unknown value;
- *   - format_utc_offset(): available versus unavailable/invalid.
+ *   - format_utc_offset(): available versus unavailable/invalid;
+ *   - demo_seed_clock()'s fixed start-time packing (DEMO_MODE only in
+ *     dialog.c: a static 10-08-2026 23:11:22, not derived from the build).
  *
  * Not covered here (needs real hardware or the AES): the ROM3 reads in
  * sidetnfs_probe_get_rtc_sync_state() itself, and the evnt_multi() timer
@@ -378,9 +380,32 @@ static const char *network_status_text(int load_state, int link_state, const cha
     }
 }
 
+/* Mirrors demo_seed_clock()'s fixed packing (dialog.c, DEMO_MODE only) --
+ * a static start time (10 August 2026, 23:11:22), not derived from the
+ * build date, so a rebuild on a different day never changes what the
+ * recording shows. */
+static void test_demo_clock_seed(void)
+{
+    unsigned short packed_date, packed_time;
+    int y, m, d, h, mi, s;
+
+    printf("Test 8: demo_seed_clock() fixed start time\n");
+
+    packed_date = pack_date(2026, 8, 10);
+    packed_time = pack_time(23, 11, 22);
+    gemdos_decode_date(packed_date, &y, &m, &d);
+    gemdos_decode_time(packed_time, &h, &mi, &s);
+    CHECK(y == 2026 && m == 8 && d == 10, "the fixed demo date is 10-08-2026");
+    CHECK(h == 23 && mi == 11 && s == 22, "the fixed demo time is 23:11:22");
+
+    /* 22 is even, so it survives the two-second-step storage exactly --
+     * this fixed value was chosen so the display never rounds down. */
+    CHECK((22 / 2) * 2 == 22, "22 seconds round-trips through the two-second GEMDOS step without loss");
+}
+
 static void test_network_status(void)
 {
-    printf("Test 8: network status line\n");
+    printf("Test 9: network status line\n");
 
     CHECK(strcmp(network_status_text(M_NETLOAD_OK, SIDETNFS_NET_LINK_CONNECTED, "MyAP", "x"),
                  "Connected") == 0,
@@ -495,7 +520,7 @@ static void test_line_layout(void)
 {
     char line[SW_LINE_BUF];
 
-    printf("Test 9: labelled lines share one value column\n");
+    printf("Test 10: labelled lines share one value column\n");
 
     sw_set_labelled_line(line, "Network:", "Connected");
     CHECK(strcmp(line, "Network: Connected") == 0, "Network line matches the agreed layout");
@@ -543,7 +568,7 @@ static void test_ip_line(void)
 {
     char value[40];
 
-    printf("Test 10: IP line\n");
+    printf("Test 11: IP line\n");
 
     /* Static mode: the stored address is the one the Pico uses. */
     sw_format_ip_value(1, "192.168.18.22", value);
@@ -575,7 +600,7 @@ static void test_drive_rows(void)
 {
     char line[SW_LINE_BUF];
 
-    printf("Test 11: drive rows and truncation\n");
+    printf("Test 12: drive rows and truncation\n");
 
     sw_format_drive_row(line, 'N', "Retroloft", "TNFS");
     CHECK(strlen(line) == SW_LINE_COLS, "a drive row is exactly the line width");
@@ -613,7 +638,7 @@ static void test_drive_header_and_list(void)
     MSlot slots[M_MAX_DRIVES];
     int i;
 
-    printf("Test 12: header count and the active-drive list\n");
+    printf("Test 13: header count and the active-drive list\n");
 
     sw_format_drive_header(line, 7);
     CHECK(strncmp(line, "Active drives:", 14) == 0, "the header reads exactly \"Active drives:\"");
@@ -688,6 +713,7 @@ int main(void)
     test_clock_placement();
     test_ntp_status();
     test_timezone();
+    test_demo_clock_seed();
     test_network_status();
     test_line_layout();
     test_ip_line();

@@ -233,7 +233,9 @@ static OBJECT sd_dlg[SD_NOBJS];
 static OBJECT te_dlg[TE_NOBJS];
 static OBJECT nc_dlg[NC_NOBJS];
 static OBJECT rc_dlg[RC_NOBJS];
+#ifndef DEMO_MODE
 static OBJECT upd_dlg[UPD_NOBJS];
+#endif
 static OBJECT ov_dlg[OV_NOBJS];
 static OBJECT sw_dlg[SW_NOBJS];
 
@@ -639,6 +641,7 @@ static int validate_drive(const Drive *d, const DriveConfig *cfg, int skip_index
  * every drive/SETTINGS-letter protocol error the user can hit (SET_DRIVE,
  * DELETE_DRIVE, SET_CONFIG_DRIVE, SAVE_CONFIG) is shown by name, never as
  * a bare status number. */
+#ifndef DEMO_MODE
 static const char *sidetnfs_drive_status_text(unsigned long status)
 {
     switch (status) {
@@ -661,6 +664,7 @@ static const char *sidetnfs_drive_status_text(unsigned long status)
     default:                                     return "Unknown status.";
     }
 }
+#endif
 
 /* ================================================================== */
 /* Firmware probe (Fase AC-4, protocol v3). Shows the GET_CONFIG_INFO   */
@@ -671,6 +675,9 @@ static const char *sidetnfs_drive_status_text(unsigned long status)
 /* ================================================================== */
 static void dialog_probe_firmware(void)
 {
+#ifdef DEMO_MODE
+    form_alert(1, "[1][Firmware configuration|SETTINGS disk: S:|Configured drives: 0][OK]");
+#else
     SideTnfsConfigInfo config_info;
     SideTnfsDriveInfo drive_info;
     char msg[200];
@@ -730,6 +737,7 @@ static void dialog_probe_firmware(void)
         form_alert(1, msg);
         break;
     }
+#endif
 }
 
 /* ================================================================== */
@@ -743,6 +751,7 @@ static void dialog_probe_firmware(void)
 /* Caller must have already validated w->type is SD or TNFS whenever
  * w->state != EMPTY -- an unrecognized type on a configured slot is a
  * load-time error, not something to silently default to TNFS here. */
+#ifndef DEMO_MODE
 static void wire_to_ui_drive(const SideTnfsDriveInfo *w, Drive *d)
 {
     memset(d, 0, sizeof(*d));
@@ -859,6 +868,7 @@ static int fetch_drive_config_from_firmware(DriveConfig *out)
     *out = built;
     return 1;
 }
+#endif
 
 /* Startup wrapper: distinguishes "no firmware at all" (silent, expected
  * offline case -- a plain GET_CONFIG_INFO timeout), "firmware speaks an
@@ -871,6 +881,25 @@ static int fetch_drive_config_from_firmware(DriveConfig *out)
  * stays blocked (see dialog_run()'s firmware_backed). */
 static int dialog_startup_load(DriveConfig *cfg)
 {
+#ifdef DEMO_MODE
+    /* Demo start state: the SETTINGS disk plus one pre-configured TNFS
+     * drive (N:), the rest of the eight slots empty -- see DEMO_MODE
+     * notes at the top of this file. firmware_backed=1 so Save/Restart
+     * behave like a real, working unit for the recording. */
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->settings_letter = 'S';
+
+    cfg->drives[0].state     = DRIVE_SLOT_ENABLED;
+    cfg->drives[0].letter    = 'N';
+    cfg->drives[0].type      = DRIVE_TYPE_TNFS;
+    cfg->drives[0].transport = DRIVE_TRANSPORT_UDP;
+    cfg->drives[0].port      = 16384;
+    strncpy(cfg->drives[0].nickname,   "Retroloft TNFS", DRIVE_NICK_LEN - 1);
+    strncpy(cfg->drives[0].host,       "retroloft.net",  DRIVE_HOST_LEN - 1);
+    strncpy(cfg->drives[0].mount_path, "/ATARI.ST",      DRIVE_MOUNT_LEN - 1);
+
+    return 1;
+#else
     SideTnfsConfigInfo probe;
     DriveConfig fw_cfg;
     char msg[100];
@@ -892,6 +921,7 @@ static int dialog_startup_load(DriveConfig *cfg)
 
     form_alert(1, "[3][SideTNFS firmware|Unexpected configuration.|Using built-in defaults.][OK]");
     return 0;
+#endif
 }
 
 static int drives_match(const Drive *a, const Drive *b)
@@ -946,6 +976,12 @@ static int drive_config_matches(const DriveConfig *a, const DriveConfig *b)
  * structurally impossible. */
 static int save_to_firmware(const DriveConfig *cfg, char *msg)
 {
+#ifdef DEMO_MODE
+    /* Demo save: pretend it worked, never touch the cartridge. */
+    (void)cfg;
+    (void)msg;
+    return 1;
+#else
     unsigned long status;
     int i;
     DriveConfig readback;
@@ -1010,6 +1046,7 @@ static int save_to_firmware(const DriveConfig *cfg, char *msg)
     }
 
     return 1;
+#endif
 }
 
 /* ================================================================== */
@@ -1021,6 +1058,7 @@ static int save_to_firmware(const DriveConfig *cfg, char *msg)
 /* strncpy + the destination's own prior memset/NUL.                    */
 /* ================================================================== */
 
+#ifndef DEMO_MODE
 static void wire_to_ui_netconfig(const SideTnfsNetworkConfig *w, NetConfig *nc)
 {
     memset(nc, 0, sizeof(*nc));
@@ -1050,7 +1088,11 @@ static void ui_to_wire_netconfig(const NetConfig *nc, SideTnfsNetworkConfig *w)
     strncpy(w->gateway,     nc->gateway,    SIDETNFS_NET_IPV4_LEN - 1);
     strncpy(w->primary_dns, nc->dns_server, SIDETNFS_NET_IPV4_LEN - 1);
 }
+#endif
 
+/* Also used by status_refresh_network() (always compiled) to report a
+ * bad GET_NETWORK_CONFIG status from startup, so this stays available
+ * in DEMO_MODE even though the firmware calls that fill msg do not. */
 static const char *netconfig_status_text(unsigned long status)
 {
     switch (status) {
@@ -1071,6 +1113,7 @@ static const char *netconfig_status_text(unsigned long status)
     }
 }
 
+#ifndef DEMO_MODE
 /* Silent building block, same shape as fetch_drive_config_from_firmware():
  * returns 1 on a fully consistent OK read, 0 on timeout or any non-OK
  * status -- *out is left untouched on failure. */
@@ -1086,6 +1129,7 @@ static int fetch_network_config_from_firmware(NetConfig *out)
     wire_to_ui_netconfig(&wire, out);
     return 1;
 }
+#endif
 
 /* Field-by-field local validation, mirroring validate_drive()'s shape.
  * The country code itself is already enforced at OK time by
@@ -1149,6 +1193,11 @@ static int netconfig_changed(const NetConfig *a, const NetConfig *b)
  * replace the local UI values. */
 static int save_network_to_firmware(const NetConfig *nc, char *msg)
 {
+#ifdef DEMO_MODE
+    (void)nc;
+    (void)msg;
+    return 1;
+#else
     SideTnfsNetworkConfig wire;
     unsigned long status;
     NetConfig readback;
@@ -1183,6 +1232,7 @@ static int save_network_to_firmware(const NetConfig *nc, char *msg)
     }
 
     return 1;
+#endif
 }
 
 /* Fase AC-4 (network protocol): startup counterpart to
@@ -1195,6 +1245,15 @@ static int save_network_to_firmware(const NetConfig *nc, char *msg)
  * save for a session that never touched the Config dialog. */
 static void network_startup_load(void)
 {
+#ifdef DEMO_MODE
+    /* No cartridge to ask -- fake a connected WiFi for the recording
+     * (status_refresh_network() forces link_connected to match). */
+    strncpy(g_netconfig.ssid, "RetroLoft", NETCONFIG_SSID_LEN - 1);
+    g_netconfig.ssid[NETCONFIG_SSID_LEN - 1] = '\0';
+    strncpy(g_netconfig.password, "demopassword", NETCONFIG_PASSWORD_LEN - 1);
+    g_netconfig.password[NETCONFIG_PASSWORD_LEN - 1] = '\0';
+    g_netconfig_load_state = NETLOAD_OK;
+#else
     SideTnfsNetworkConfig wire;
     int result = sidetnfs_probe_get_network_config(&wire);
 
@@ -1210,6 +1269,7 @@ static void network_startup_load(void)
     } else {
         g_netconfig_load_state = NETLOAD_UNAVAILABLE;
     }
+#endif
     g_netconfig_baseline = g_netconfig;
 }
 
@@ -1220,6 +1280,7 @@ static void network_startup_load(void)
 /* though every field length happens to match numerically today.       */
 /* ================================================================== */
 
+#ifndef DEMO_MODE
 static void wire_to_ui_rtcconfig(const SideTnfsRtcConfig *w, RtcConfig *rc)
 {
     memset(rc, 0, sizeof(*rc));
@@ -1265,6 +1326,7 @@ static int fetch_rtc_config_from_firmware(RtcConfig *out)
     wire_to_ui_rtcconfig(&wire, out);
     return 1;
 }
+#endif
 
 /* Shared by rc_save_to_config() (live TEDINFO edit buffers, see the
  * Clock/NTP editor above) and validate_rtcconfig() (perform_save()'s
@@ -1322,6 +1384,11 @@ static int rtcconfig_changed(const RtcConfig *a, const RtcConfig *b)
  * (the caller's live g_rtcconfig) is never touched here. */
 static int save_rtc_to_firmware(const RtcConfig *rc, char *msg)
 {
+#ifdef DEMO_MODE
+    (void)rc;
+    (void)msg;
+    return 1;
+#else
     SideTnfsRtcConfig wire;
     unsigned long status;
     RtcConfig readback;
@@ -1356,6 +1423,7 @@ static int save_rtc_to_firmware(const RtcConfig *rc, char *msg)
     }
 
     return 1;
+#endif
 }
 
 /* Fase 12A: startup counterpart to network_startup_load(), called right
@@ -1370,12 +1438,14 @@ static int save_rtc_to_firmware(const RtcConfig *rc, char *msg)
  * the Clock dialog. */
 static void rtc_startup_load(void)
 {
+#ifndef DEMO_MODE
     SideTnfsRtcConfig wire;
 
     if (sidetnfs_probe_get_rtc_config(&wire) == SIDETNFS_PROBE_OK
         && wire.status == SIDETNFS_RTCCONFIG_STATUS_OK) {
         wire_to_ui_rtcconfig(&wire, &g_rtcconfig);
     }
+#endif
     g_rtcconfig_baseline = g_rtcconfig;
 }
 
@@ -2195,17 +2265,19 @@ static void rtc_editor_run(RtcConfig *rc)
  * has no room for "installed vs. latest" plus a two-line URL without
  * truncating something a user actually needs to read. */
 /* ================================================================== */
-#define UPD_LINE_BUF 56
-static char buf_upd_line2[UPD_LINE_BUF];
-
 /* This build's installed firmware version, as reported by the Pico over
  * CMD_CHECK_UPDATE (see update_startup_check() below) -- filled in once
  * at startup, empty if the check never got a response (no firmware,
- * older firmware that doesn't know 0x041C, or offline). Read by
- * sw_dialog_init() to show the version in the main window title, so
- * that title reuses this same round-trip instead of asking the firmware
- * a second time via a separate command. */
+ * older firmware that doesn't know 0x041C, or offline; always empty in
+ * DEMO_MODE, which never probes at all). Read by sw_dialog_init() to
+ * show the version in the main window title, so that title reuses this
+ * same round-trip instead of asking the firmware a second time via a
+ * separate command. */
 static char g_installed_version[SIDETNFS_UPDATE_VERSION_LEN] = "";
+
+#ifndef DEMO_MODE
+#define UPD_LINE_BUF 56
+static char buf_upd_line2[UPD_LINE_BUF];
 
 static void upd_dialog_init(void)
 {
@@ -2297,6 +2369,7 @@ static void upd_notice_run(const char *installed, const char *latest)
 
     form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
 }
+#endif
 
 /* Firmware-update check, run once at startup. Same silent-fallback shape
  * as rtc_startup_load()/network_startup_load() above: no firmware, older
@@ -2314,6 +2387,9 @@ static void upd_notice_run(const char *installed, const char *latest)
  * notice above and sw_dialog_init()'s title below. */
 static void update_startup_check(void)
 {
+#ifdef DEMO_MODE
+    return; /* no cartridge, no firmware version to check */
+#else
     SideTnfsUpdateCheck info;
 
     if (sidetnfs_probe_check_update(&info) != SIDETNFS_PROBE_OK)
@@ -2325,6 +2401,7 @@ static void update_startup_check(void)
     if (info.status == SIDETNFS_UPDATE_STATUS_AVAILABLE) {
         upd_notice_run(info.installed_version, info.latest_version);
     }
+#endif
 }
 
 /* ================================================================== */
@@ -2861,6 +2938,11 @@ static void offer_restart_if_needed(int restart_required)
      * never trigger an unattended Pico reboot + Atari reset. */
     if (form_alert(2, "[1][Settings saved.|Restart SideTNFS and Atari|"
                       "to apply the changes?][Restart|Later]") == 1) {
+#ifdef DEMO_MODE
+        /* No Pico to reboot -- just reset the Atari (Hatari), same as
+         * the user would see happen for real. */
+        Supexec(atari_do_reset);
+#else
         int i;
 
         if (sidetnfs_probe_reboot_pico() != SIDETNFS_PROBE_OK) {
@@ -2877,6 +2959,7 @@ static void offer_restart_if_needed(int restart_required)
         for (i = 0; i < REBOOT_PICO_SETTLE_VBLS; i++)
             Vsync();
         Supexec(atari_do_reset);
+#endif
     } else {
         form_alert(1, "[1][Settings saved.|They will become active after|"
                       "the next restart.][OK]");
@@ -3249,7 +3332,11 @@ static void status_refresh_network(const DriveConfig *cfg)
 
     (void)cfg; /* TNFS servers belong to the drive list, not to network status */
 
+#ifdef DEMO_MODE
+    link_connected = 1; /* no cartridge to read a link state from -- fake "Connected" for the recording */
+#else
     link_connected = (sidetnfs_probe_get_network_link_state() == SIDETNFS_NET_LINK_CONNECTED);
+#endif
 
     /* The link state comes from GEMDRVEMUL_NETWORK_STATUS, the same
      * status long the GEMDRIVE ROM waits on during boot, so "Connected"
@@ -3326,6 +3413,29 @@ static void gemdos_format_clock(unsigned short date, unsigned short time, int fi
         out[0] = '\0';
     }
 }
+
+#ifdef DEMO_MODE
+/* DEMO_MODE has no real boot-time hand-off to demonstrate, and the test
+ * rigs this is built for (bare Hatari, no NVRAM, no cartridge) leave
+ * TOS's own clock unset at ~1980-01-01 with nothing to ever correct it --
+ * Tgetdate()/Tgettime() faithfully report that, which is why the demo
+ * showed a wildly wrong date. Seeding the clock once at startup, in the
+ * exact packed format Tgetdate()/Tgettime() use, fixes this at the root:
+ * status_refresh_clock_text() below needs no change at all and keeps
+ * reading -- and genuinely ticking -- the live, now-correct Atari clock.
+ * Fixed start time (chosen for the recording, not the build date): 10
+ * August 2026, 23:11:22. */
+static void demo_seed_clock(void)
+{
+    unsigned short packed_date, packed_time;
+
+    packed_date = (unsigned short)(((2026 - 1980) << 9) | (8 << 5) | 10);
+    packed_time = (unsigned short)((23 << 11) | (11 << 5) | (22 / 2));
+
+    Tsetdate((short)packed_date);
+    Tsettime((short)packed_time);
+}
+#endif
 
 /* Reads the Atari's own system clock -- never the Pico's. What this shows
  * is the time the Atari actually has, which is the point: it is how the
@@ -3415,7 +3525,12 @@ static void status_refresh_clock(void)
     /* Both on one line. The longest form,
      * "Not synchronized  TZ: UTC+01:00", is 31 characters, which is what
      * the SW_LINE_COLS - SW_LABEL_COLS budget below has to hold. */
+#ifdef DEMO_MODE
+    /* No cartridge to ask -- the demo always shows a synchronized clock. */
+    sprintf(value, "%-16s  TZ: %s", rtc_sync_text(SIDETNFS_RTC_SYNC_SYNCED), tz);
+#else
     sprintf(value, "%-16s  TZ: %s", rtc_sync_text(sidetnfs_probe_get_rtc_sync_state()), tz);
+#endif
     sw_set_labelled_line(sw_clock_ntp, "NTP:", value);
 
     status_refresh_clock_text();
@@ -3629,6 +3744,10 @@ void dialog_run(DriveConfig *cfg)
     short which;
     int done;
     int firmware_backed;
+
+#ifdef DEMO_MODE
+    demo_seed_clock();
+#endif
 
     shared_fields_init();
 
