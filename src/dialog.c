@@ -136,6 +136,23 @@ enum {
 };
 
 /* ================================================================== */
+/* "Please wait" notice (PW_*)                                         */
+/* Shown for the whole startup-probe sequence in dialog_run() (drive/   */
+/* network/RTC/update-check) -- each one is individually bounded, but   */
+/* back to back they can add up to several seconds on a healthy         */
+/* connection and far more if a step times out (offline WiFi, no        */
+/* internet for the update check), during which the screen would        */
+/* otherwise show nothing at all. Not interactive -- drawn once via     */
+/* objc_draw(), no form_do() loop, then form_dial(FMD_FINISH)'d right   */
+/* before the real main window replaces it. */
+/* ================================================================== */
+enum {
+    PW_ROOT = 0,
+    PW_LINE,
+    PW_NOBJS
+};
+
+/* ================================================================== */
 /* WiFi/network settings editor (NC_*)                                 */
 /* Fase AC-5: local UI state only -- see netconfig.h. Country is a      */
 /* plain two-letter code field, validated and uppercased on OK (see     */
@@ -238,6 +255,7 @@ static OBJECT upd_dlg[UPD_NOBJS];
 #endif
 static OBJECT ov_dlg[OV_NOBJS];
 static OBJECT sw_dlg[SW_NOBJS];
+static OBJECT pw_dlg[PW_NOBJS];
 
 /* ================================================================== */
 /* Shared editable-field buffers/TEDINFOs                              */
@@ -2404,6 +2422,48 @@ static void update_startup_check(void)
 #endif
 }
 
+/* Coordinates remembered between pw_dialog_show() and pw_dialog_hide() --
+ * form_dial(FMD_FINISH) needs the exact same x/y/w/h form_dial(FMD_START)
+ * used. */
+static short pw_x, pw_y, pw_w, pw_h;
+
+/* Draws the "please wait" box and returns immediately -- no form_do(),
+ * nothing to click. Call pw_dialog_hide() once the real startup work is
+ * done, right before the next thing is drawn over it. */
+static void pw_dialog_show(void)
+{
+    short cw, ch, bw, bh;
+    int rh, tm;
+    int DW, DH;
+    const char *msg = "Please wait, loading configuration...";
+
+    graf_handle(&cw, &ch, &bw, &bh);
+    rh = (int)ch;
+    tm = (rh / 4 > 2) ? rh / 4 : 2;
+
+    DW = (int)(strlen(msg) + 4) * cw;
+    DH = rh + 2 * tm;
+
+    set_obj(pw_dlg, PW_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
+    pw_dlg[PW_ROOT].ob_spec.index = 0x00031070L;
+
+    set_obj(pw_dlg, PW_LINE, G_STRING, NONE, NORMAL, 2*cw, tm, DW - 4*cw, rh);
+    pw_dlg[PW_LINE].ob_spec.free_string = (char *)msg;
+
+    wire_tree(pw_dlg, PW_NOBJS);
+
+    form_center(pw_dlg, &pw_x, &pw_y, &pw_w, &pw_h);
+    form_dial(FMD_START, pw_x, pw_y, pw_w, pw_h, pw_x, pw_y, pw_w, pw_h);
+    objc_draw(pw_dlg, PW_ROOT, MAX_DEPTH, pw_x, pw_y, pw_w, pw_h);
+
+    (void)bw; (void)bh;
+}
+
+static void pw_dialog_hide(void)
+{
+    form_dial(FMD_FINISH, pw_x, pw_y, pw_w, pw_h, pw_x, pw_y, pw_w, pw_h);
+}
+
 /* ================================================================== */
 /* WiFi/network settings editor (Fase AC-5)                            */
 /* UI only: no firmware read/write, no flash, no file. OK copies the   */
@@ -3751,6 +3811,13 @@ void dialog_run(DriveConfig *cfg)
 
     shared_fields_init();
 
+    /* The four startup probes below are each individually bounded, but
+     * back to back -- and worse, if one of them times out (offline
+     * WiFi, no internet for the update check) -- they can leave the
+     * screen blank for several seconds with nothing telling the user
+     * anything is happening. */
+    pw_dialog_show();
+
     /* No local file storage: *cfg starts out as the built-in defaults
      * (drive_config_init_defaults(), set by main.c) and is fully
      * replaced by the firmware's own drive list when one is found. See
@@ -3773,6 +3840,18 @@ void dialog_run(DriveConfig *cfg)
      * silent-fallback shape. Shows a one-time notice dialog only when
      * the firmware reports a newer version is available. */
     update_startup_check();
+
+    pw_dialog_hide();
+
+    /* No WiFi configured at all (blank SSID, e.g. a virgin/factory-reset
+     * cartridge) -- go straight to the network editor instead of making
+     * the user find the CONFIG button themselves. Same "temporary
+     * buffers, committed only on Save" contract as the CONFIG button
+     * below: this only edits g_netconfig in RAM, nothing is written to
+     * the firmware until the user saves from the main window. */
+    if (!buf_nonempty(g_netconfig.ssid)) {
+        netconfig_editor_run(&g_netconfig);
+    }
 
     sw_dialog_init();
     status_window_refresh(cfg);
