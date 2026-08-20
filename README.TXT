@@ -1,9 +1,9 @@
 SideTNFS Settings Disk
 ======================
 
-Firmware release    : v1.0.1
+Firmware release    : v1.0.3
 Settings tool       : SIDETNFS.PRG
-Document date       : 2026-07-24
+Document date       : 2026-08-20
 
 Official website:
   https://retroloft.net/sidetnfs
@@ -39,7 +39,6 @@ PLANNED FEATURES
 
   * Floppy drive emulation
   * Advanced RTC with time zone support
-  * ROM support (if there is enough user interest)
   * Atari Falcon support (where technically possible)
 
 
@@ -53,7 +52,7 @@ Bug reports:
   https://github.com/RetroLoft/SideTNFS-Firmware/issues
 
 Discord:
-  (community invite)
+  https://discord.gg/SaSaAdxfKe
 
 
 Enjoy SideTNFS!
