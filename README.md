@@ -18,9 +18,34 @@ Because the SETTINGS disk has to be there and usable from the very first boot ‚Ä
 
 ## Requirements
 
-- `m68k-atari-mint-gcc` cross-compiler
-- `gemlib-m68k-atari-mint`
-- `mintlib-m68k-atari-mint`
+Building `SIDETNFS.PRG` needs a cross-compiler that runs *on your Linux/PC
+and outputs Atari ST 68000/TOS binaries* -- an ordinary `gcc` cannot do
+this, since the Atari's CPU and OS are nothing like the machine you're
+building on.
+
+- **Toolchain: `m68k-atari-mint-gcc`**, part of the "MiNT cross-tools"
+  toolchain for Atari ST/TT/Falcon development, maintained by Vincent
+  Rivi√®re and distributed as a Launchpad PPA for Debian/Ubuntu:
+  <https://launchpad.net/~vriviere/+archive/ubuntu/ppa>.
+
+  **Install (Debian/Ubuntu):**
+  ```
+  sudo add-apt-repository ppa:vriviere/ppa
+  sudo apt update
+  sudo apt install cross-mint-essential gemlib-m68k-atari-mint mintlib-m68k-atari-mint
+  ```
+  `cross-mint-essential` pulls in the compiler itself
+  (`gcc-m68k-atari-mint`) plus the matching assembler/linker
+  (`binutils-m68k-atari-mint`, `mintbin-m68k-atari-mint`).
+  `gemlib-m68k-atari-mint` and `mintlib-m68k-atari-mint` are the GEM and C
+  library headers/archives this project's `#include <gem.h>` etc. and
+  linking (`-lgem`) need -- both are required alongside the compiler.
+
+  Everything installs under standard system paths -- the compiler as
+  `/usr/bin/m68k-atari-mint-gcc` (on your `PATH` already), its headers and
+  libraries under `/usr/m68k-atari-mint/`. **No environment variable or
+  sysroot needs to be set** for the toolchain itself; once installed,
+  `make` in this repository just works.
 
 ## Build
 
@@ -28,7 +53,24 @@ Because the SETTINGS disk has to be there and usable from the very first boot ‚Ä
 make
 ```
 
-Output: `SIDETNFS.PRG`
+Output: `SIDETNFS.PRG`. This default target (`all`) also *installs* the
+build afterwards -- see `INSTALLDIR` below -- so on a fresh checkout,
+plain `make` will fail at that last copy step until you've pointed
+`INSTALLDIR` at a real location on your machine. To just build, without
+installing anywhere, run `make SIDETNFS.PRG` instead.
+
+### `INSTALLDIR` -- where a build gets copied to
+
+The `Makefile`'s `INSTALLDIR` variable is this repository's own local
+working directory for testing: after every successful `make`, both
+`SIDETNFS.PRG` and `README.TXT` are copied there (see `DISTFILES`),
+so they can be picked up by a real Atari/emulator's SETTINGS disk without
+a manual copy step every time. It defaults to this project's own share
+(`/mnt/retroloft/retro/Atari.ST/CONFIG`), which almost certainly doesn't
+exist on your machine -- change it at the top of the `Makefile` to
+wherever *your* Atari or emulator (e.g. Hatari) mounts its SETTINGS disk
+from, or drop the `install` dependency from the `all` target entirely if
+you'd rather just build.
 
 ## Clean
 
@@ -105,8 +147,11 @@ before cutting a release:
 1. **Build your modified tool** in this repository:
 
    ```
-   make
+   make SIDETNFS.PRG
    ```
+
+   (plain `make` also works, but additionally tries to install the build
+   to `INSTALLDIR` -- see [Build](#build) above.)
 
 2. **Regenerate the embedded C array** from a checkout of
    `SideTNFS-Firmware`, pointing the generator at your local build instead
