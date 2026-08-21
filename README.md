@@ -1,6 +1,20 @@
 # SideTNFS Configuration Tool
 
-Atari ST GEM configuration tool for SideTNFS.
+> **This repository is part of [SideTNFS-Firmware](https://github.com/RetroLoft/SideTNFS-Firmware).** It is not a standalone product: it builds `SIDETNFS.PRG`, and the firmware repository embeds that exact binary into the Pico's own flash memory as a C byte array, so it can hand it to the Atari as a virtual disk. See [How this gets into the firmware](#how-this-gets-into-the-firmware) below for the full picture.
+
+## What this is
+
+SideTNFS is a cartridge for the Atari ST family that emulates a GEMDOS hard drive over WiFi (TNFS) or a microSD card, using a Raspberry Pi Pico. The Pico has no screen or keyboard of its own, so it needs some other way to be configured — that's what this program is for.
+
+Every SideTNFS cartridge always exposes a small, read-only **SETTINGS disk** (default drive `S:`), even on a Pico that has never seen a network or an SD card. That disk contains exactly two files: `README.TXT` and **`SIDETNFS.PRG`**, the GEM application built from this repository. Run it from the Atari desktop and it talks directly to the running firmware over the cartridge's own ROM3 bus — there is no local config file anywhere — to add, edit, enable/disable, or remove TNFS/SD drives, change WiFi settings, and set the clock/NTP timezone. Save writes straight to the Pico's internal flash; changes take effect once the Sidecart restarts.
+
+Because the SETTINGS disk has to be there and usable from the very first boot — before any drive, network, or storage backend exists to read files from — its contents can't be loaded from a filesystem at startup the way a normal TNFS or SD drive's files are. Instead, `SideTNFS-Firmware` compiles `SIDETNFS.PRG` (and `README.TXT`) directly into its own firmware image, as a `const uint8_t[]` array baked into flash, and serves that memory back to the Atari through a small, read-only, root-only virtual-drive backend — no RAM copy, no SD/WiFi access, nothing ever written back to it. In other words: **this repository is where the tool is developed and released, but a build of it only ever reaches a real cartridge by being embedded into that other project's firmware binary.**
+
+## Screenshot
+
+![SIDETNFS.PRG Network Settings dialog](docs/config.png)
+
+*(the WiFi/Network editor, one of `SIDETNFS.PRG`'s configuration screens)*
 
 ## Requirements
 
@@ -61,3 +75,64 @@ from this file) must always be published as a release asset alongside
 `SIDETNFS.PRG` -- never release the `.PRG` on its own. `make`/`make
 install` already copies both together (see `DISTFILES` in the
 `Makefile`); keep that in sync if the release process changes.
+
+This matters beyond convenience: as described below, `SideTNFS-Firmware`'s
+default embedding step pulls both files straight from this repository's
+**latest GitHub release**, so a release missing either asset breaks that
+process for everyone building the firmware from source.
+
+## How this gets into the firmware
+
+`SideTNFS-Firmware`'s `romemul/download_sidetnfs_config_drive.py` turns
+`SIDETNFS.PRG` and `README.TXT` into `romemul/sidetnfs_config_drive.c` --
+a plain, byte-exact C array for each file, with its length and a SHA-256
+checksum recorded in a comment above it, compiled straight into the Pico
+firmware image. That generated file is committed to the firmware repo
+(the script is not run automatically by the build) so offline builds stay
+reproducible.
+
+By default, with no arguments, the script downloads both files from this
+repository's [latest GitHub release](https://github.com/RetroLoft/SideTNFS-Config/releases/latest)
+-- that is the supported, production path: publish a release here with
+`SIDETNFS.PRG` and `README.TXT` as assets, then regenerate and rebuild the
+firmware from it.
+
+### Getting your own modified `SIDETNFS.PRG` into the firmware
+
+To try out a local change to this tool on real (or emulated) hardware,
+before cutting a release:
+
+1. **Build your modified tool** in this repository:
+
+   ```
+   make
+   ```
+
+2. **Regenerate the embedded C array** from a checkout of
+   `SideTNFS-Firmware`, pointing the generator at your local build instead
+   of a release:
+
+   ```
+   cd SideTNFS-Firmware/romemul
+   python3 download_sidetnfs_config_drive.py \
+       --prg    ../../SideTNFS-Config/SIDETNFS.PRG \
+       --readme ../../SideTNFS-Config/README.TXT
+   ```
+
+   (Adjust the relative paths if the two repositories aren't checked out
+   next to each other.) This overwrites `romemul/sidetnfs_config_drive.c`
+   with your build, byte-for-byte, and prints each file's size and SHA-256
+   so you can confirm exactly what went in.
+
+3. **Rebuild and flash the firmware** as usual -- see
+   `SideTNFS-Firmware`'s own `build.sh`/README. The new SETTINGS disk
+   contents are now part of that firmware image.
+
+4. Treat step 2's result as local/throwaway: don't commit a
+   `sidetnfs_config_drive.c` generated from an unreleased build.
+   `SideTNFS-Firmware`'s committed copy is meant to always trace back to a
+   published `SideTNFS-Config` release -- once your change is ready,
+   publish it as a proper release here first (see
+   [Release assets](#release-assets) above), then regenerate
+   `sidetnfs_config_drive.c` from that release (running the script with no
+   `--prg`/`--readme`) before committing it in the firmware repo.
