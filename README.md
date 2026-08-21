@@ -25,10 +25,10 @@ building on.
 
 - **Toolchain: `m68k-atari-mint-gcc`**, part of the "MiNT cross-tools"
   toolchain for Atari ST/TT/Falcon development, maintained by Vincent
-  Rivière and distributed as a Launchpad PPA for Debian/Ubuntu:
-  <https://launchpad.net/~vriviere/+archive/ubuntu/ppa>.
+  Rivière. Two ways to get it, depending on your platform:
 
-  **Install (Debian/Ubuntu):**
+  **Option A -- native package (Debian/Ubuntu only), via a Launchpad PPA:
+  <https://launchpad.net/~vriviere/+archive/ubuntu/ppa>**
   ```
   sudo add-apt-repository ppa:vriviere/ppa
   sudo apt update
@@ -46,6 +46,43 @@ building on.
   libraries under `/usr/m68k-atari-mint/`. **No environment variable or
   sysroot needs to be set** for the toolchain itself; once installed,
   `make` in this repository just works.
+
+  **Option B -- Windows, macOS, or any Linux without that PPA: a Docker
+  image of the same toolchain,
+  [`atarist-toolkit-docker`](https://github.com/sidecartridge/atarist-toolkit-docker)**
+  (from the same `sidecartridge`/RetroLoft project family this repository
+  belongs to). It bundles `m68k-atari-mint-gcc` plus `vasm`/`vlink`,
+  driven through a small `stcmd` wrapper that runs commands inside the
+  container:
+  ```
+  # Linux/macOS installer
+  curl -sL https://github.com/sidecartridge/atarist-toolkit-docker/releases/download/latest/install_atarist_toolkit_docker.sh | bash
+
+  # Windows: download and run from the releases page
+  # https://github.com/sidecartridge/atarist-toolkit-docker/releases/latest
+  #   install_atarist_toolkit_docker.cmd
+  ```
+  Once installed, build this repository through it instead of a bare
+  `make`:
+  ```
+  stcmd make
+  ```
+
+  `stcmd` needs to know which folder on your machine to mount into the
+  container -- by default it mounts the current directory, which is what
+  the `ST_WORKING_FOLDER` environment variable overrides when set. On
+  Linux/macOS this default is normally enough and you can skip it
+  entirely; **on Windows, set it explicitly before running `stcmd`**,
+  pointed at this repository's checkout, e.g. from Command Prompt:
+  ```
+  cd path\to\SideTNFS-Config
+  set ST_WORKING_FOLDER=%cd%
+  ```
+  or, from a POSIX-style shell such as Git Bash:
+  ```
+  cd path/to/SideTNFS-Config
+  export ST_WORKING_FOLDER=`pwd`
+  ```
 
 ## Build
 
