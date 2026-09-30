@@ -708,16 +708,16 @@ static void dialog_probe_firmware(void)
     char msg[200];
 
     if (sidetnfs_probe_get_config_info(&config_info) != SIDETNFS_PROBE_OK) {
-        form_alert(1, "[3][SideTNFS firmware|not responding (timeout).][OK]");
+        form_alert(1, "[3][" DEVICE_NAME " firmware|not responding (timeout).][OK]");
         return;
     }
     if (config_info.status != SIDETNFS_STATUS_OK) {
-        sprintf(msg, "[3][SideTNFS firmware|%s][OK]", sidetnfs_drive_status_text(config_info.status));
+        sprintf(msg, "[3][" DEVICE_NAME " firmware|%s][OK]", sidetnfs_drive_status_text(config_info.status));
         form_alert(1, msg);
         return;
     }
     if (config_info.protocol_version != SIDETNFS_CONFIG_PROTOCOL_VERSION) {
-        sprintf(msg, "[3][Unsupported SideTNFS configuration protocol|Firmware: %lu|Application: %lu][OK]",
+        sprintf(msg, "[3][Unsupported " DEVICE_NAME " configuration protocol|Firmware: %lu|Application: %lu][OK]",
                 config_info.protocol_version, SIDETNFS_CONFIG_PROTOCOL_VERSION);
         form_alert(1, msg);
         return;
@@ -728,11 +728,11 @@ static void dialog_probe_firmware(void)
     form_alert(1, msg);
 
     if (sidetnfs_probe_get_drive(0, &drive_info) != SIDETNFS_PROBE_OK) {
-        form_alert(1, "[3][SideTNFS drive|GET_DRIVE(0) timed out.][OK]");
+        form_alert(1, "[3][" DEVICE_NAME " drive|GET_DRIVE(0) timed out.][OK]");
         return;
     }
     if (drive_info.status != SIDETNFS_STATUS_OK) {
-        sprintf(msg, "[3][SideTNFS drive|%s][OK]", sidetnfs_drive_status_text(drive_info.status));
+        sprintf(msg, "[3][" DEVICE_NAME " drive|%s][OK]", sidetnfs_drive_status_text(drive_info.status));
         form_alert(1, msg);
         return;
     }
@@ -933,7 +933,7 @@ static int dialog_startup_load(DriveConfig *cfg)
         return 0; /* no firmware detected -- expected offline case, no alert */
 
     if (probe.status == SIDETNFS_STATUS_OK && probe.protocol_version != SIDETNFS_CONFIG_PROTOCOL_VERSION) {
-        sprintf(msg, "[3][Unsupported SideTNFS configuration protocol|Firmware: %lu|Application: %lu][OK]",
+        sprintf(msg, "[3][Unsupported " DEVICE_NAME " configuration protocol|Firmware: %lu|Application: %lu][OK]",
                 probe.protocol_version, SIDETNFS_CONFIG_PROTOCOL_VERSION);
         form_alert(1, msg);
         return 0; /* Save stays blocked -- never write with mismatched semantics */
@@ -944,7 +944,7 @@ static int dialog_startup_load(DriveConfig *cfg)
         return 1;
     }
 
-    form_alert(1, "[3][SideTNFS firmware|Unexpected configuration.|Using built-in defaults.][OK]");
+    form_alert(1, "[3][" DEVICE_NAME " firmware|Unexpected configuration.|Using built-in defaults.][OK]");
     return 0;
 #endif
 }
@@ -1289,7 +1289,7 @@ static void network_startup_load(void)
         char msg[100];
         g_netconfig_load_state     = NETLOAD_BAD_STATUS;
         g_netconfig_load_fw_status = wire.status;
-        sprintf(msg, "[3][SideTNFS network config|%s][OK]", netconfig_status_text(wire.status));
+        sprintf(msg, "[3][" DEVICE_NAME " network config|%s][OK]", netconfig_status_text(wire.status));
         form_alert(1, msg);
     } else {
         g_netconfig_load_state = NETLOAD_UNAVAILABLE;
@@ -2346,7 +2346,7 @@ static void upd_dialog_init(void)
     upd_dlg[UPD_DIV1].ob_spec.index = 0x00001171L;
 
     set_obj(upd_dlg, UPD_LINE1, G_STRING, NONE, NORMAL, xl, yline1, DW - 4*cw, rh);
-    upd_dlg[UPD_LINE1].ob_spec.free_string = "A newer SideTNFS firmware version is available.";
+    upd_dlg[UPD_LINE1].ob_spec.free_string = "A newer " DEVICE_NAME " firmware version is available.";
 
     set_obj(upd_dlg, UPD_LINE2, G_STRING, NONE, NORMAL, xl, yline2, DW - 4*cw, rh);
     upd_dlg[UPD_LINE2].ob_spec.free_string = buf_upd_line2; /* filled in by upd_notice_run() */
@@ -2355,7 +2355,7 @@ static void upd_dialog_init(void)
     upd_dlg[UPD_LINE3].ob_spec.free_string = "For update instructions, see:";
 
     set_obj(upd_dlg, UPD_LINE4, G_STRING, NONE, NORMAL, xl, yline4, DW - 4*cw, rh);
-    upd_dlg[UPD_LINE4].ob_spec.free_string = "https://github.com/RetroLoft/SideTNFS-Firmware/";
+    upd_dlg[UPD_LINE4].ob_spec.free_string = FIRMWARE_URL;
 
     set_obj(upd_dlg, UPD_LINE5, G_STRING, NONE, NORMAL, xl, yline5, DW - 4*cw, rh);
     upd_dlg[UPD_LINE5].ob_spec.free_string = "blob/main/UPDATE.md";
@@ -2879,7 +2879,7 @@ static void ov_dialog_init(void)
     ov_dlg[OV_ROOT].ob_spec.index = 0x00031070L;
 
     set_obj(ov_dlg, OV_TITLE, G_STRING, NONE, NORMAL, 14*cw, yt, 20*cw, rh);
-    ov_dlg[OV_TITLE].ob_spec.free_string = "SideTNFS Drives";
+    ov_dlg[OV_TITLE].ob_spec.free_string = DEVICE_NAME " Drives";
 
     set_obj(ov_dlg, OV_DIV1, G_BOX, NONE, NORMAL, cw, ydiv1, DW - 2*cw, 2);
     ov_dlg[OV_DIV1].ob_spec.index = 0x00001171L;
@@ -3003,7 +3003,7 @@ static void offer_restart_if_needed(int restart_required)
     /* Later is the safe default (button 2) even though Restart is
      * listed first, per the report -- accidentally hitting Return must
      * never trigger an unattended Pico reboot + Atari reset. */
-    if (form_alert(2, "[1][Settings saved.|Restart SideTNFS and Atari|"
+    if (form_alert(2, "[1][Settings saved.|Restart " DEVICE_NAME " and Atari|"
                       "to apply the changes?][Restart|Later]") == 1) {
 #ifdef DEMO_MODE
         /* No Pico to reboot -- just reset the Atari (Hatari), same as
@@ -3017,7 +3017,7 @@ static void offer_restart_if_needed(int restart_required)
              * too old to recognize REBOOT_PICO" -- either way, no ACK
              * was ever seen, so the Atari must not reset: nothing on
              * the Pico side is known to be restarting. */
-            form_alert(1, "[3][Restart failed|(no response from SideTNFS).|"
+            form_alert(1, "[3][Restart failed|(no response from " DEVICE_NAME ").|"
                           "Settings are saved and will become|"
                           "active after a manual restart.][OK]");
             return;
@@ -3101,7 +3101,7 @@ static int perform_save(DriveConfig *cfg, int firmware_backed)
     if (!firmware_backed) {
         /* No firmware detected -- there is nowhere left to save to (no
          * local file fallback anymore). */
-        form_alert(1, "[3][Save failed|No SideTNFS firmware detected.|Nothing was saved.][OK]");
+        form_alert(1, "[3][Save failed|No " DEVICE_NAME " firmware detected.|Nothing was saved.][OK]");
         return 0;
     }
 

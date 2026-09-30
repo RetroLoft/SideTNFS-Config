@@ -47,7 +47,7 @@ int main(void)
     if (Getrez() == 0) {
         /* Cancel is the default (button 1): rebooting the whole machine
          * is easy to trigger by accident otherwise. */
-        if (form_alert(1, "[3][SideTNFS Config|This program requires|Medium or High resolution.]"
+        if (form_alert(1, "[3][" DEVICE_NAME " Config|This program requires|Medium or High resolution.]"
                           "[Cancel|Switch & Reboot]") == 2) {
             Setscreen(-1L, -1L, 1);
             Supexec(atari_do_reset);
