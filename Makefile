@@ -12,6 +12,7 @@ LDFLAGS    = -s -lgem
 
 TARGET      = SIDETNFS.PRG
 TARGET_DEMO = DEMOTNFS.PRG
+TARGET_ACSI = ACSITNFS.PRG
 SRCS        = src/main.c src/drive.c src/netconfig.c src/rtcconfig.c src/dialog.c src/sidetnfs_probe.c
 INSTALLDIR  = /mnt/retroloft/retro/Atari.ST/CONFIG
 
@@ -35,10 +36,20 @@ $(TARGET): $(SRCS)
 demo: $(SRCS)
 	$(CC) $(CFLAGS) -DDEMO_MODE -o $(TARGET_DEMO) $(SRCS) $(LDFLAGS)
 
+# ACSI build: the same UI, but the configuration protocol goes over the
+# ACSI/DMA port to an ACSI2TNFS adapter (src/sidetnfs_acsi.c replaces the
+# cartridge transport src/sidetnfs_probe.c). Never installs.
+ACSI_SRCS = $(filter-out src/sidetnfs_probe.c,$(SRCS)) src/sidetnfs_acsi.c
+
+acsi: $(TARGET_ACSI)
+
+$(TARGET_ACSI): $(ACSI_SRCS)
+	$(CC) $(CFLAGS) -DTRANSPORT_ACSI -o $(TARGET_ACSI) $(ACSI_SRCS) $(LDFLAGS)
+
 install: $(DISTFILES)
 	cp -v $(DISTFILES) $(INSTALLDIR)/
 
 clean:
-	rm -f $(TARGET) $(TARGET_DEMO)
+	rm -f $(TARGET) $(TARGET_DEMO) $(TARGET_ACSI)
 
-.PHONY: all install clean demo
+.PHONY: all install clean demo acsi
