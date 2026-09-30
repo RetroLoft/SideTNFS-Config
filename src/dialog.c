@@ -422,6 +422,13 @@ static char ov_settings_val[OV_SETTINGS_BUF];
  * g_installed_version above) -- 23 chars + 1 space + up to
  * SIDETNFS_UPDATE_VERSION_LEN (16), rounded up with room to spare. */
 #define SW_TITLE_BUF 48
+
+/* Product name in the window title: the ACSI build configures ACSI2TNFS. */
+#ifdef TRANSPORT_ACSI
+#define SW_PRODUCT_NAME "ACSITNFS"
+#else
+#define SW_PRODUCT_NAME "SIDETNFS"
+#endif
 static char sw_title_buf[SW_TITLE_BUF];
 
 static char sw_net_line[3][SW_LINE_BUF];
@@ -3257,10 +3264,10 @@ static void sw_dialog_init(void)
      * second source of truth. Left off entirely (falls back to the
      * plain title) when that check never got a response. */
     if (g_installed_version[0] != '\0') {
-        sprintf(sw_title_buf, "SIDETNFS Configuration %s", g_installed_version);
+        sprintf(sw_title_buf, SW_PRODUCT_NAME " Configuration %s", g_installed_version);
         sw_title_buf[SW_TITLE_BUF - 1] = '\0';
     } else {
-        strcpy(sw_title_buf, "SIDETNFS Configuration");
+        strcpy(sw_title_buf, SW_PRODUCT_NAME " Configuration");
     }
     {
         int title_chars = (int)strlen(sw_title_buf);
