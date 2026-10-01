@@ -106,6 +106,7 @@ enum {
     RC_LBL_NTP,    RC_NTP_BTN,
     RC_LBL_SERVER, RC_SERVER_EDIT,
     RC_LBL_OFFSET, RC_OFFSET_EDIT,
+    RC_HDR_CLOCK,  RC_DIV_MID, RC_HDR_ACSI,   /* ACSI build only: two sections */
     RC_LBL_ACSI,   RC_ACSI_EDIT,      /* ACSI build only, hidden otherwise */
     RC_DIV2,
     RC_OK, RC_CANCEL,
@@ -263,7 +264,7 @@ static OBJECT pw_dlg[PW_NOBJS];
 /* Reused across CL/SD/TE editors (never open simultaneously). Sized to */
 /* the firmware-agreed field lengths in drive.h.                       */
 /* ================================================================== */
-#define TE_BUF_DRV    3
+#define TE_BUF_DRV    2   /* one character: a drive letter or the ACSI id */
 #define TE_BUF_NICK   DRIVE_NICK_LEN   /* 24 */
 #define TE_BUF_HOST   DRIVE_HOST_LEN   /* 64 */
 #define TE_BUF_PORT   7
@@ -1501,6 +1502,72 @@ static void rtc_startup_load(void)
 }
 
 /* ================================================================== */
+/* form_do() for dialogs with one-character fields                     */
+/* Same behaviour as form_do(), except that typing in a field that     */
+/* holds exactly one character (drive letter, ACSI id) replaces that   */
+/* character: GEM itself ignores keys once a field is full, so the     */
+/* user would first have to delete the old value.                      */
+/* ================================================================== */
+
+static int is_onechar_field(OBJECT *tree, short obj)
+{
+    return obj > 0 && (tree[obj].ob_flags & EDITABLE)
+        && (tree[obj].ob_type == G_FBOXTEXT || tree[obj].ob_type == G_FTEXT)
+        && tree[obj].ob_spec.tedinfo->te_txtlen == 2;
+}
+
+static short form_do_1c(OBJECT *tree, short start_obj)
+{
+    short edit_obj = 0, next_obj = start_obj, idx = 0;
+    short mx, my, mb, ks, kr, br, event, cont = 1;
+    short msg[8];
+
+    while (cont) {
+        if (next_obj > 0 && next_obj != edit_obj) {
+            edit_obj = next_obj;
+            next_obj = 0;
+            objc_edit(tree, edit_obj, 0, &idx, ED_INIT);
+        }
+        event = evnt_multi(MU_KEYBD | MU_BUTTON,
+                           2, 1, 1,
+                           0, 0, 0, 0, 0,
+                           0, 0, 0, 0, 0,
+                           msg, 0UL,
+                           &mx, &my, &mb, &ks, &kr, &br);
+        if (event & MU_KEYBD) {
+            cont = form_keybd(tree, edit_obj, next_obj, kr, &next_obj, &kr);
+            if (kr && edit_obj > 0) {
+                char c = (char)(kr & 0xFF);
+                if (is_onechar_field(tree, edit_obj) && c > ' ' && c < 0x7F) {
+                    short ox, oy;
+                    objc_edit(tree, edit_obj, 0, &idx, ED_END);    /* cursor off */
+                    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');   /* drive letters: E, not e */
+                    tree[edit_obj].ob_spec.tedinfo->te_ptext[0] = c;
+                    tree[edit_obj].ob_spec.tedinfo->te_ptext[1] = '\0';
+                    objc_offset(tree, edit_obj, &ox, &oy);
+                    objc_draw(tree, 0, MAX_DEPTH, ox, oy,
+                              tree[edit_obj].ob_width, tree[edit_obj].ob_height);
+                    objc_edit(tree, edit_obj, 0, &idx, ED_INIT);   /* cursor back */
+                } else {
+                    objc_edit(tree, edit_obj, kr, &idx, ED_CHAR);
+                }
+            }
+        }
+        if (event & MU_BUTTON) {
+            next_obj = objc_find(tree, 0, MAX_DEPTH, mx, my);
+            if (next_obj < 0) {
+                next_obj = 0;
+            } else {
+                cont = form_button(tree, next_obj, br, &next_obj);
+            }
+        }
+        if (edit_obj > 0 && (!cont || (next_obj > 0 && next_obj != edit_obj)))
+            objc_edit(tree, edit_obj, 0, &idx, ED_END);
+    }
+    return next_obj;
+}
+
+/* ================================================================== */
 /* SETTINGS disk letter editor                                         */
 /* Only the drive letter is editable; nickname/type are fixed context. */
 /* No Test, no Delete/Remove -- the SETTINGS disk always exists and is  */
@@ -1600,7 +1667,7 @@ static void cl_editor_run(DriveConfig *cfg)
 
     done = 0;
     while (!done) {
-        which = (short)(form_do(cl_dlg, CL_DRIVE_EDIT) & 0x7FFF);
+        which = (short)(form_do_1c(cl_dlg, CL_DRIVE_EDIT) & 0x7FFF);
         wait_mouse_release();
 
         switch (which) {
@@ -1768,7 +1835,7 @@ static int sd_editor_run(DriveConfig *cfg, int index)
 
     done = 0;
     while (!done) {
-        which = (short)(form_do(sd_dlg, SD_DRIVE_EDIT) & 0x7FFF);
+        which = (short)(form_do_1c(sd_dlg, SD_DRIVE_EDIT) & 0x7FFF);
         wait_mouse_release();
 
         switch (which) {
@@ -2003,7 +2070,7 @@ static int tnfs_editor_run(DriveConfig *cfg, int index)
 
     done = 0;
     while (!done) {
-        which = (short)(form_do(te_dlg, TE_DRIVE_EDIT) & 0x7FFF);
+        which = (short)(form_do_1c(te_dlg, TE_DRIVE_EDIT) & 0x7FFF);
         wait_mouse_release();
 
         switch (which) {
@@ -2138,7 +2205,7 @@ static void rc_dialog_init(void)
     short sx, sy, sw, sh;
     int rh, tm, pitch;
     int DW, DH, xl, xf;
-    int yt, ydiv1, yntp, yserver, yoffset, yacsi, ydiv2, ybtn;
+    int yt, ydiv1, yhclk, yntp, yserver, yoffset, ydivm, yhacsi, yacsi, ydiv2, ybtn;
 
     graf_handle(&cw, &ch, &bw, &bh);
     wind_get(0, WF_WORKXYWH, &sx, &sy, &sw, &sh);
@@ -2149,18 +2216,34 @@ static void rc_dialog_init(void)
     pitch = rh + 3;
 
     DW = 54 * cw;
+#ifdef TRANSPORT_ACSI
+    /* two sections, Clock and ACSI bus, each with a heading; rows indented */
+    xl = 4 * cw;
+    xf = 31 * cw;
+#else
     xl = 2 * cw;
     xf = 29 * cw; /* past "Set Atari clock using NTP:" (26 chars) + margin */
+#endif
 
     yt      = tm;
     ydiv1   = yt + rh + 1;
+#ifdef TRANSPORT_ACSI
+    yhclk   = ydiv1 + 5;
+    yntp    = yhclk + pitch;
+#else
+    yhclk   = ydiv1;                    /* heading hidden */
     yntp    = ydiv1 + 5;
+#endif
     yserver = yntp + pitch;
     yoffset = yserver + pitch;
 #ifdef TRANSPORT_ACSI
-    yacsi   = yoffset + pitch;
+    ydivm   = yoffset + rh + 4;
+    yhacsi  = ydivm + 5;
+    yacsi   = yhacsi + pitch;
 #else
-    yacsi   = yoffset;                  /* row hidden */
+    ydivm   = yoffset;                  /* second section hidden */
+    yhacsi  = yoffset;
+    yacsi   = yoffset;
 #endif
     ydiv2   = yacsi + rh + 2;
     ybtn    = ydiv2 + 7;
@@ -2193,6 +2276,18 @@ static void rc_dialog_init(void)
     rc_dlg[RC_LBL_OFFSET].ob_spec.free_string = "UTC offset:";
     set_obj(rc_dlg, RC_OFFSET_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, yoffset, 4*cw, rh);
     rc_dlg[RC_OFFSET_EDIT].ob_spec.tedinfo = &ti_rc_offset;
+
+    set_obj(rc_dlg, RC_HDR_CLOCK, G_STRING, NONE, NORMAL, 2*cw, yhclk, 10*cw, rh);
+    rc_dlg[RC_HDR_CLOCK].ob_spec.free_string = "Clock";
+    set_obj(rc_dlg, RC_DIV_MID, G_BOX, NONE, NORMAL, cw, ydivm, DW - 2*cw, 2);
+    rc_dlg[RC_DIV_MID].ob_spec.index = 0x00001171L;
+    set_obj(rc_dlg, RC_HDR_ACSI, G_STRING, NONE, NORMAL, 2*cw, yhacsi, 10*cw, rh);
+    rc_dlg[RC_HDR_ACSI].ob_spec.free_string = "ACSI bus";
+#ifndef TRANSPORT_ACSI
+    rc_dlg[RC_HDR_CLOCK].ob_flags |= HIDETREE;
+    rc_dlg[RC_DIV_MID].ob_flags |= HIDETREE;
+    rc_dlg[RC_HDR_ACSI].ob_flags |= HIDETREE;
+#endif
 
     set_obj(rc_dlg, RC_LBL_ACSI, G_STRING, NONE, NORMAL, xl, yacsi, 26*cw, rh);
     rc_dlg[RC_LBL_ACSI].ob_spec.free_string = "ACSI device ID (0-7):";
@@ -2315,7 +2410,7 @@ static void rtc_editor_run(RtcConfig *rc)
     done = 0;
     start_obj = RC_SERVER_EDIT;
     while (!done) {
-        which = (short)(form_do(rc_dlg, start_obj) & 0x7FFF);
+        which = (short)(form_do_1c(rc_dlg, start_obj) & 0x7FFF);
         wait_mouse_release();
         start_obj = RC_SERVER_EDIT;
 
@@ -2345,7 +2440,12 @@ static void rtc_editor_run(RtcConfig *rc)
 #ifdef TRANSPORT_ACSI
             if (g_cfg_live && g_cfg_live->acsi_id != rc_acsi_id_from_field()) {
                 g_cfg_live->acsi_id = rc_acsi_id_from_field();
-                form_alert(1, "[1][The new ACSI device ID is used|after Save and a restart. Give|every device on the ACSI bus|its own ID.][OK]");
+                {
+                    char m[120];
+                    sprintf(m, "[1][ACSI device ID set to %d.|Press Save in the main window|and restart to use it.][OK]",
+                            g_cfg_live->acsi_id);
+                    form_alert(1, m);
+                }
             }
 #endif
             done = 1;
