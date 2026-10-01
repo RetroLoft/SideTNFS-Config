@@ -38,6 +38,8 @@
 #define CMD_REBOOT_PICO         0x041BU
 #define CMD_CHECK_UPDATE        0x041CU
 #define CMD_GET_STATUS          0x0480U     /* ACSI2TNFS: live clock/link state */
+#define CMD_GET_ADAPTER         0x0481U     /* ACSI2TNFS: ACSI id now / next */
+#define CMD_SET_ACSI_ID         0x0482U     /* ACSI2TNFS: id from the next reset */
 
 #define PROBE_TIMEOUT_SEC        5
 #define SAVE_CONFIG_TIMEOUT_SEC  10
@@ -294,6 +296,23 @@ int sidetnfs_probe_delete_drive(unsigned long index, unsigned long *out_status)
 int sidetnfs_probe_set_config_drive(unsigned long letter, unsigned long *out_status)
 {
     return simple(CMD_SET_CONFIG_DRIVE, 1, letter, out_status, PROBE_TIMEOUT_SEC);
+}
+
+int sidetnfs_probe_get_acsi_id(unsigned long *now, unsigned long *next)
+{
+    req_start(CMD_GET_ADAPTER);
+    if (transact(PROBE_TIMEOUT_SEC) != SIDETNFS_PROBE_OK)
+        return SIDETNFS_PROBE_TIMEOUT;
+    if (get32() != 0)
+        return SIDETNFS_PROBE_TIMEOUT;     /* older firmware: unknown command */
+    *now = get32();
+    *next = get32();
+    return SIDETNFS_PROBE_OK;
+}
+
+int sidetnfs_probe_set_acsi_id(unsigned long id, unsigned long *out_status)
+{
+    return simple(CMD_SET_ACSI_ID, 1, id, out_status, PROBE_TIMEOUT_SEC);
 }
 
 int sidetnfs_probe_save_config(unsigned long *out_status)

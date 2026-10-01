@@ -59,6 +59,7 @@ typedef struct {
 typedef struct {
     Drive drives[MAX_DRIVES]; /* fixed slots 0..7, never compacted/sorted */
     char  settings_letter;    /* SETTINGS disk drive letter, e.g. 'S' -- always active, not part of drives[] */
+    int   acsi_id;            /* ACSI build: id of the adapter from the next reset, -1 = unknown */
 } DriveConfig;
 
 /* Single source of truth for the three-state semantics -- never compare

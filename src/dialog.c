@@ -106,6 +106,7 @@ enum {
     RC_LBL_NTP,    RC_NTP_BTN,
     RC_LBL_SERVER, RC_SERVER_EDIT,
     RC_LBL_OFFSET, RC_OFFSET_EDIT,
+    RC_LBL_ACSI,   RC_ACSI_EDIT,      /* ACSI build only, hidden otherwise */
     RC_DIV2,
     RC_OK, RC_CANCEL,
     RC_NOBJS
@@ -877,6 +878,14 @@ static int fetch_drive_config_from_firmware(DriveConfig *out)
 
     memset(&built, 0, sizeof(built));
     built.settings_letter = letter;
+    built.acsi_id = -1;
+#ifdef TRANSPORT_ACSI
+    {
+        unsigned long now, next;
+        if (sidetnfs_probe_get_acsi_id(&now, &next) == SIDETNFS_PROBE_OK && next <= 7)
+            built.acsi_id = (int)next;
+    }
+#endif
 
     for (i = 0; i < MAX_ORDINARY_DRIVES; i++) {
         if (sidetnfs_probe_get_drive((unsigned long)i, &wire) != SIDETNFS_PROBE_OK)
@@ -981,6 +990,9 @@ static int drive_config_matches(const DriveConfig *a, const DriveConfig *b)
 {
     int i;
     if (a->settings_letter != b->settings_letter) return 0;
+#ifdef TRANSPORT_ACSI
+    if (a->acsi_id != b->acsi_id) return 0;
+#endif
     for (i = 0; i < MAX_DRIVES; i++)
         if (!drives_match(&a->drives[i], &b->drives[i]))
             return 0;
@@ -1032,6 +1044,20 @@ static int save_to_firmware(const DriveConfig *cfg, char *msg)
                 sidetnfs_drive_status_text(status));
         return 0;
     }
+
+#ifdef TRANSPORT_ACSI
+    /* stored by SAVE_CONFIG below, used by the adapter from the next reset */
+    if (cfg->acsi_id >= 0) {
+        if (sidetnfs_probe_set_acsi_id((unsigned long)cfg->acsi_id, &status) != SIDETNFS_PROBE_OK) {
+            sprintf(msg, "[3][Save to firmware failed|SET_ACSI_ID timed out.|Nothing was saved.][OK]");
+            return 0;
+        }
+        if (status != 0) {
+            sprintf(msg, "[3][Save to firmware failed|Invalid ACSI ID %d.|Nothing was saved.][OK]", cfg->acsi_id);
+            return 0;
+        }
+    }
+#endif
 
     for (i = 0; i < MAX_ORDINARY_DRIVES; i++) {
         SideTnfsDriveInfo wire;
@@ -2112,7 +2138,7 @@ static void rc_dialog_init(void)
     short sx, sy, sw, sh;
     int rh, tm, pitch;
     int DW, DH, xl, xf;
-    int yt, ydiv1, yntp, yserver, yoffset, ydiv2, ybtn;
+    int yt, ydiv1, yntp, yserver, yoffset, yacsi, ydiv2, ybtn;
 
     graf_handle(&cw, &ch, &bw, &bh);
     wind_get(0, WF_WORKXYWH, &sx, &sy, &sw, &sh);
@@ -2131,7 +2157,12 @@ static void rc_dialog_init(void)
     yntp    = ydiv1 + 5;
     yserver = yntp + pitch;
     yoffset = yserver + pitch;
-    ydiv2   = yoffset + rh + 2;
+#ifdef TRANSPORT_ACSI
+    yacsi   = yoffset + pitch;
+#else
+    yacsi   = yoffset;                  /* row hidden */
+#endif
+    ydiv2   = yacsi + rh + 2;
     ybtn    = ydiv2 + 7;
     DH      = ybtn + rh + tm + 3;
 
@@ -2139,7 +2170,11 @@ static void rc_dialog_init(void)
     rc_dlg[RC_ROOT].ob_spec.index = 0x00031070L;
 
     set_obj(rc_dlg, RC_TITLE, G_STRING, NONE, NORMAL, 20*cw, yt, 14*cw, rh);
+#ifdef TRANSPORT_ACSI
+    rc_dlg[RC_TITLE].ob_spec.free_string = "More settings";
+#else
     rc_dlg[RC_TITLE].ob_spec.free_string = "Clock / NTP";
+#endif
 
     set_obj(rc_dlg, RC_DIV1, G_BOX, NONE, NORMAL, cw, ydiv1, DW - 2*cw, 2);
     rc_dlg[RC_DIV1].ob_spec.index = 0x00001171L;
@@ -2158,6 +2193,15 @@ static void rc_dialog_init(void)
     rc_dlg[RC_LBL_OFFSET].ob_spec.free_string = "UTC offset:";
     set_obj(rc_dlg, RC_OFFSET_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, yoffset, 4*cw, rh);
     rc_dlg[RC_OFFSET_EDIT].ob_spec.tedinfo = &ti_rc_offset;
+
+    set_obj(rc_dlg, RC_LBL_ACSI, G_STRING, NONE, NORMAL, xl, yacsi, 26*cw, rh);
+    rc_dlg[RC_LBL_ACSI].ob_spec.free_string = "ACSI device ID (0-7):";
+    set_obj(rc_dlg, RC_ACSI_EDIT, G_FBOXTEXT, EDITABLE, NORMAL, xf, yacsi, 2*cw, rh);
+    rc_dlg[RC_ACSI_EDIT].ob_spec.tedinfo = &ti_te_drive;
+#ifndef TRANSPORT_ACSI
+    rc_dlg[RC_LBL_ACSI].ob_flags |= HIDETREE;
+    rc_dlg[RC_ACSI_EDIT].ob_flags = HIDETREE;
+#endif
 
     set_obj(rc_dlg, RC_DIV2, G_BOX, NONE, NORMAL, cw, ydiv2, DW - 2*cw, 2);
     rc_dlg[RC_DIV2].ob_spec.index = 0x00001171L;
@@ -2232,6 +2276,20 @@ static int rc_save_to_config(RtcConfig *rc)
     return 1;
 }
 
+#ifdef TRANSPORT_ACSI
+/* The drive configuration being edited (set by dialog_run()): the More
+ * dialog edits its acsi_id, which is saved together with the drives. */
+static DriveConfig *g_cfg_live;
+
+/* "0".."7" in the field -> 0..7, else -1 */
+static int rc_acsi_id_from_field(void)
+{
+    if (buf_te_drive[0] < '0' || buf_te_drive[0] > '7') return -1;
+    if (buf_te_drive[1] != '\0' && buf_te_drive[1] != ' ') return -1;
+    return buf_te_drive[0] - '0';
+}
+#endif
+
 static void rtc_editor_run(RtcConfig *rc)
 {
     short x, y, w, h;
@@ -2241,6 +2299,14 @@ static void rtc_editor_run(RtcConfig *rc)
 
     rc_dialog_init();
     rc_load_from_config(rc);
+#ifdef TRANSPORT_ACSI
+    {
+        char id[2];
+        id[0] = (g_cfg_live && g_cfg_live->acsi_id >= 0) ? (char)('0' + g_cfg_live->acsi_id) : '\0';
+        id[1] = '\0';
+        set_buf(buf_te_drive, TE_BUF_DRV, id);
+    }
+#endif
 
     form_center(rc_dlg, &x, &y, &w, &h);
     form_dial(FMD_START, x, y, w, h, x, y, w, h);
@@ -2265,10 +2331,23 @@ static void rtc_editor_run(RtcConfig *rc)
             break;
 
         case RC_OK:
+#ifdef TRANSPORT_ACSI
+            if (g_cfg_live && rc_acsi_id_from_field() < 0) {
+                form_alert(1, "[3][Validation error|The ACSI device ID must be|0 to 7.][OK]");
+                start_obj = RC_ACSI_EDIT;
+                break;
+            }
+#endif
             if (!rc_save_to_config(rc)) {
                 start_obj = RC_SERVER_EDIT;
                 break;
             }
+#ifdef TRANSPORT_ACSI
+            if (g_cfg_live && g_cfg_live->acsi_id != rc_acsi_id_from_field()) {
+                g_cfg_live->acsi_id = rc_acsi_id_from_field();
+                form_alert(1, "[1][The new ACSI device ID is used|after Save and a restart. Give|every device on the ACSI bus|its own ID.][OK]");
+            }
+#endif
             done = 1;
             break;
 
@@ -2593,7 +2672,11 @@ static void nc_dialog_init(void)
     nc_dlg[NC_DIV3].ob_spec.index = 0x00001171L;
 
     set_obj(nc_dlg, NC_CLOCK_BTN, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 38*cw, ybtn, 9*cw, rh);
+#ifdef TRANSPORT_ACSI
+    nc_dlg[NC_CLOCK_BTN].ob_spec.free_string = "  More   ";   /* clock + ACSI device id */
+#else
     nc_dlg[NC_CLOCK_BTN].ob_spec.free_string = "  Clock  ";
+#endif
 
     set_obj(nc_dlg, NC_OK, G_BUTTON, EXIT | DEFAULT | TOUCHEXIT, NORMAL, 15*cw, ybtn, 8*cw, rh);
     nc_dlg[NC_OK].ob_spec.free_string = "   OK   ";
@@ -2885,11 +2968,18 @@ static void ov_dialog_init(void)
     ov_dlg[OV_DIV1].ob_spec.index = 0x00001171L;
 
     set_obj(ov_dlg, OV_LBL_SETTINGS, G_STRING, NONE, NORMAL, cw, ysettings, 14*cw, rh);
+#ifdef TRANSPORT_ACSI
+    ov_dlg[OV_LBL_SETTINGS].ob_spec.free_string = "Flash disk:";
+#else
     ov_dlg[OV_LBL_SETTINGS].ob_spec.free_string = "SETTINGS disk:";
+#endif
     set_obj(ov_dlg, OV_SETTINGS_VAL, G_STRING, NONE, NORMAL, 15*cw, ysettings, 20*cw, rh);
     ov_dlg[OV_SETTINGS_VAL].ob_spec.free_string = ov_settings_val;
     set_obj(ov_dlg, OV_SETTINGS_BTN, G_BUTTON, EXIT | TOUCHEXIT, NORMAL, 36*cw, ysettings, 8*cw, rh);
     ov_dlg[OV_SETTINGS_BTN].ob_spec.free_string = " Edit ";
+#ifdef TRANSPORT_ACSI
+    ov_dlg[OV_SETTINGS_BTN].ob_flags |= HIDETREE;   /* nothing to edit: C: is fixed */
+#endif
 
     set_obj(ov_dlg, OV_DIV2, G_BOX, NONE, NORMAL, cw, ydiv2, DW - 2*cw, 2);
     ov_dlg[OV_DIV2].ob_spec.index = 0x00001171L;
@@ -2926,7 +3016,11 @@ static void ov_refresh_rows(const DriveConfig *cfg)
 {
     int i;
 
+#ifdef TRANSPORT_ACSI
+    sprintf(ov_settings_val, "C:");     /* the adapter's flash disk, always C: */
+#else
     sprintf(ov_settings_val, "%c:", cfg->settings_letter);
+#endif
 
     for (i = 0; i < MAX_DRIVES; i++) {
         const Drive *d = &cfg->drives[i];
@@ -3807,6 +3901,9 @@ static short sw_form_do_ticking(void)
 
 void dialog_run(DriveConfig *cfg)
 {
+#ifdef TRANSPORT_ACSI
+    g_cfg_live = cfg;
+#endif
     short x, y, w, h;
     short which;
     int done;

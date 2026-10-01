@@ -159,6 +159,13 @@ int sidetnfs_probe_get_drive(unsigned long index, SideTnfsDriveInfo *info);
 int sidetnfs_probe_set_drive(unsigned long index, const SideTnfsDriveInfo *in, unsigned long *out_status);
 int sidetnfs_probe_delete_drive(unsigned long index, unsigned long *out_status);
 int sidetnfs_probe_set_config_drive(unsigned long letter, unsigned long *out_status);
+
+#ifdef TRANSPORT_ACSI
+/* ACSI2TNFS adapter: ACSI id now and from the next reset; set the latter
+   (stored by the next SAVE_CONFIG, used from the next reset on) */
+int sidetnfs_probe_get_acsi_id(unsigned long *now, unsigned long *next);
+int sidetnfs_probe_set_acsi_id(unsigned long id, unsigned long *out_status);
+#endif
 int sidetnfs_probe_save_config(unsigned long *out_status);
 
 int sidetnfs_probe_get_network_config(SideTnfsNetworkConfig *info);
