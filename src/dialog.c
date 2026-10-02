@@ -617,6 +617,12 @@ static int validate_drive(const Drive *d, const DriveConfig *cfg, int skip_index
         sprintf(msg, "[3][Validation error|Drive %c: invalid letter.][OK]", d->letter);
         return 0;
     }
+#ifdef TRANSPORT_ACSI
+    if (d->letter > 'P') {      /* TOS knows 16 drives, A: .. P: */
+        sprintf(msg, "[3][Validation error|Drive %c: use C: to P:.|TOS knows 16 drives.][OK]", d->letter);
+        return 0;
+    }
+#endif
     if (d->letter == cfg->settings_letter) {
         sprintf(msg, "[3][Validation error|Drive letter %c: is reserved|for the SETTINGS disk.][OK]", d->letter);
         return 0;
