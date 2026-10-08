@@ -256,6 +256,7 @@ static OBJECT upd_dlg[UPD_NOBJS];
 static OBJECT ov_dlg[OV_NOBJS];
 static OBJECT sw_dlg[SW_NOBJS];
 static OBJECT pw_dlg[PW_NOBJS];
+static short g_sw_wh = -1; /* Falcon AES window of the status dialog; -1 on ST */
 
 /* ================================================================== */
 /* Shared editable-field buffers/TEDINFOs                              */
@@ -418,9 +419,7 @@ static char ov_settings_val[OV_SETTINGS_BUF];
  * their value in the same column. */
 #define SW_LABEL_COLS 9
 
-/* "SIDETNFS Configuration" plus an optional " vX.Y.Z" suffix (see
- * g_installed_version above) -- 23 chars + 1 space + up to
- * SIDETNFS_UPDATE_VERSION_LEN (16), rounded up with room to spare. */
+/* "SIDETNFS" + PRG tag + optional firmware version. */
 #define SW_TITLE_BUF 48
 static char sw_title_buf[SW_TITLE_BUF];
 
@@ -497,6 +496,38 @@ static void set_obj(OBJECT *tree, int id, int type, int flags, int state,
     tree[id].ob_height = (short)h;
 }
 
+/* TOS 4 form_dial(FMD_FINISH) redraws the desktop, not the parent form.
+ * Nested dialogs (Network is wider than the status form) punch a hole.
+ * On Falcon, put each dialog in a real AES window with 3D objects. ST
+ * keeps the original form_dial path. */
+static int aes_use_windows(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = sidetnfs_probe_is_falcon() ? 1 : 0;
+    return cached;
+}
+
+static void aes_style_tree(OBJECT *tree, int n)
+{
+    int i;
+    unsigned short t;
+
+    if (!aes_use_windows())
+        return;
+
+    tree[0].ob_flags = (unsigned short)((tree[0].ob_flags & ~OF_FL3DMASK) | FL3DBAK);
+    for (i = 1; i < n; i++) {
+        t = (unsigned short)(tree[i].ob_type & 0x00FF);
+        tree[i].ob_flags = (unsigned short)(tree[i].ob_flags & ~OF_FL3DMASK);
+        if (t == G_BUTTON)
+            tree[i].ob_flags |= FL3DACT;
+        else if (t == G_FBOXTEXT || t == G_BOXTEXT || t == G_FTEXT)
+            tree[i].ob_flags |= FL3DIND;
+    }
+}
+
 /* Wire a flat tree: objects 1..n-1 are all direct children of root. */
 static void wire_tree(OBJECT *tree, int n)
 {
@@ -513,6 +544,227 @@ static void wire_tree(OBJECT *tree, int n)
     tree[n-1].ob_head  = -1;
     tree[n-1].ob_tail  = -1;
     tree[n-1].ob_flags |= LASTOB;
+    aes_style_tree(tree, n);
+}
+
+static int rect_clip(short ax, short ay, short aw, short ah,
+                     short bx, short by, short bw, short bh,
+                     short *ox, short *oy, short *ow, short *oh)
+{
+    short x1, y1, x2, y2;
+
+    x1 = (ax > bx) ? ax : bx;
+    y1 = (ay > by) ? ay : by;
+    x2 = (short)(((ax + aw) < (bx + bw)) ? (ax + aw) : (bx + bw));
+    y2 = (short)(((ay + ah) < (by + bh)) ? (ay + ah) : (by + bh));
+    if (x2 <= x1 || y2 <= y1)
+        return 0;
+    *ox = x1;
+    *oy = y1;
+    *ow = (short)(x2 - x1);
+    *oh = (short)(y2 - y1);
+    return 1;
+}
+
+static void win_redraw_tree(short handle, OBJECT *tree, const short *msg)
+{
+    short wx, wy, ww, wh;
+    short cx, cy, cw, ch;
+
+    if (handle < 0)
+        return;
+
+    wind_update(BEG_UPDATE);
+    graf_mouse(M_OFF, (MFORM *)0);
+    wind_get(handle, WF_FIRSTXYWH, &wx, &wy, &ww, &wh);
+    while (ww && wh) {
+        if (rect_clip(msg[4], msg[5], msg[6], msg[7], wx, wy, ww, wh,
+                      &cx, &cy, &cw, &ch))
+            objc_draw(tree, 0, MAX_DEPTH, cx, cy, cw, ch);
+        wind_get(handle, WF_NEXTXYWH, &wx, &wy, &ww, &wh);
+    }
+    graf_mouse(M_ON, (MFORM *)0);
+    wind_update(END_UPDATE);
+}
+
+static void dlg_sync(OBJECT *tree, short *x, short *y, short *w, short *h)
+{
+    *x = tree[0].ob_x;
+    *y = tree[0].ob_y;
+    *w = tree[0].ob_width;
+    *h = tree[0].ob_height;
+}
+
+static void dlg_begin(OBJECT *tree, const char *title, short *handle,
+                      short *x, short *y, short *w, short *h)
+{
+    short dx, dy, dw, dh;
+    short bx, by, bw, bh;
+    short kind;
+    short wh;
+
+    *handle = -1;
+    form_center(tree, x, y, w, h);
+    if (!aes_use_windows()) {
+        form_dial(FMD_START, *x, *y, *w, *h, *x, *y, *w, *h);
+        objc_draw(tree, 0, MAX_DEPTH, *x, *y, *w, *h);
+        return;
+    }
+
+    kind = NAME | CLOSER | MOVER;
+    wind_get(0, WF_WORKXYWH, &dx, &dy, &dw, &dh);
+    wind_calc(WC_BORDER, kind, *x, *y, *w, *h, &bx, &by, &bw, &bh);
+    if (bx < dx) bx = dx;
+    if (by < dy) by = dy;
+    if ((bx + bw) > (dx + dw) && bw <= dw) bx = (short)(dx + dw - bw);
+    if ((by + bh) > (dy + dh) && bh <= dh) by = (short)(dy + dh - bh);
+    if (bx < dx) bx = dx;
+    if (by < dy) by = dy;
+
+    wh = wind_create(kind, dx, dy, dw, dh);
+    if (wh < 0) {
+        form_dial(FMD_START, *x, *y, *w, *h, *x, *y, *w, *h);
+        objc_draw(tree, 0, MAX_DEPTH, *x, *y, *w, *h);
+        return;
+    }
+
+    wind_set_str(wh, WF_NAME, title);
+    wind_open(wh, bx, by, bw, bh);
+    wind_get(wh, WF_WORKXYWH, x, y, w, h);
+    tree[0].ob_x = *x;
+    tree[0].ob_y = *y;
+    objc_draw(tree, 0, MAX_DEPTH, *x, *y, *w, *h);
+    *handle = wh;
+}
+
+static void dlg_end(short handle, short x, short y, short w, short h)
+{
+    if (handle >= 0) {
+        wind_close(handle);
+        wind_delete(handle);
+        return;
+    }
+    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+}
+
+static short dlg_first_edit(OBJECT *tree, short start)
+{
+    short i;
+
+    if (start > 0 && (tree[start].ob_flags & EDITABLE))
+        return start;
+    for (i = 1; ; i++) {
+        if (tree[i].ob_flags & EDITABLE)
+            return i;
+        if (tree[i].ob_flags & LASTOB)
+            break;
+    }
+    return 0;
+}
+
+static short dlg_form_do(OBJECT *tree, short start, short handle)
+{
+    short msg[8];
+    short mx, my, mb, ks, kr, br;
+    short event, obj, next, nxtch, cont;
+    short edit, idx;
+    short wx, wy, ww, wh;
+
+    if (handle < 0)
+        return (short)(form_do(tree, start) & 0x7FFF);
+
+    edit = dlg_first_edit(tree, start);
+    idx = 0;
+    if (edit)
+        objc_edit(tree, edit, 0, &idx, ED_INIT);
+
+    wind_update(BEG_MCTRL);
+    for (;;) {
+        event = evnt_multi(MU_KEYBD | MU_BUTTON | MU_MESAG,
+                           2, 1, 1,
+                           0, 0, 0, 0, 0,
+                           0, 0, 0, 0, 0,
+                           msg, 0UL,
+                           &mx, &my, &mb, &ks, &kr, &br);
+
+        if (event & MU_MESAG) {
+            if (msg[3] == handle) {
+                if (msg[0] == WM_REDRAW) {
+                    win_redraw_tree(handle, tree, msg);
+                } else if (msg[0] == WM_TOPPED) {
+                    wind_set(handle, WF_TOP, 0, 0, 0, 0);
+                } else if (msg[0] == WM_MOVED) {
+                    if (edit)
+                        objc_edit(tree, edit, 0, &idx, ED_END);
+                    wind_set(handle, WF_CURRXYWH, msg[4], msg[5], msg[6], msg[7]);
+                    wind_get(handle, WF_WORKXYWH, &wx, &wy, &ww, &wh);
+                    tree[0].ob_x = wx;
+                    tree[0].ob_y = wy;
+                    if (edit)
+                        objc_edit(tree, edit, 0, &idx, ED_INIT);
+                } else if (msg[0] == WM_CLOSED) {
+                    if (edit)
+                        objc_edit(tree, edit, 0, &idx, ED_END);
+                    wind_update(END_MCTRL);
+                    return 0;
+                }
+            }
+        }
+
+        if (event & MU_BUTTON) {
+            obj = objc_find(tree, 0, MAX_DEPTH, mx, my);
+            if (obj > 0) {
+                next = obj;
+                cont = form_button(tree, obj, br, &next);
+                if (!cont) {
+                    if (edit)
+                        objc_edit(tree, edit, 0, &idx, ED_END);
+                    wind_update(END_MCTRL);
+                    return (short)(next & 0x7FFF);
+                }
+                if (next > 0 && next != edit && (tree[next].ob_flags & EDITABLE)) {
+                    if (edit)
+                        objc_edit(tree, edit, 0, &idx, ED_END);
+                    edit = next;
+                    objc_edit(tree, edit, 0, &idx, ED_INIT);
+                }
+            }
+        }
+
+        if (event & MU_KEYBD) {
+            if (edit == 0) {
+                if ((kr & 0x00FF) == 0x0D) {
+                    for (obj = 1; ; obj++) {
+                        if (tree[obj].ob_flags & DEFAULT) {
+                            wind_update(END_MCTRL);
+                            return obj;
+                        }
+                        if (tree[obj].ob_flags & LASTOB)
+                            break;
+                    }
+                }
+            } else {
+            next = edit;
+            nxtch = kr;
+            cont = form_keybd(tree, edit, 0, kr, &next, &nxtch);
+            if (!cont) {
+                if (edit)
+                    objc_edit(tree, edit, 0, &idx, ED_END);
+                wind_update(END_MCTRL);
+                return (short)(next & 0x7FFF);
+            }
+            if (next != 0 && next != edit) {
+                if (edit)
+                    objc_edit(tree, edit, 0, &idx, ED_END);
+                edit = next;
+                if (edit)
+                    objc_edit(tree, edit, 0, &idx, ED_INIT);
+            } else if (nxtch && edit) {
+                objc_edit(tree, edit, nxtch, &idx, ED_CHAR);
+            }
+            }
+        }
+    }
 }
 
 /* Return 1 if buf contains at least one non-space, non-NUL character. */
@@ -847,6 +1099,15 @@ static void ui_to_wire_drive(const Drive *d, SideTnfsDriveInfo *w)
  * in a partially-loaded configuration being used or saved. No alerts:
  * this is the silent building block for both the startup load and the
  * post-Save readback verification, which report failure differently. */
+/* F32: retain the exact failed validation for the startup alert. No disk
+ * logging: the current boot drive may be absent on a standalone machine. */
+static char config_load_failure[100];
+static int config_load_fail(const char *stage, long slot, unsigned long value)
+{
+    sprintf(config_load_failure, "%s|Slot=%ld value=%lu", stage, slot, value);
+    return 0;
+}
+
 static int fetch_drive_config_from_firmware(DriveConfig *out)
 {
     SideTnfsConfigInfo config_info;
@@ -854,31 +1115,33 @@ static int fetch_drive_config_from_firmware(DriveConfig *out)
     DriveConfig built;
     int i;
     char letter;
+    int probe_result;
+    config_load_failure[0] = 0;
 
-    if (sidetnfs_probe_get_config_info(&config_info) != SIDETNFS_PROBE_OK)
-        return 0;
+    if ((probe_result = sidetnfs_probe_get_config_info(&config_info)) != SIDETNFS_PROBE_OK)
+        return config_load_fail("CONFIG_INFO transport", -1, (unsigned long)probe_result);
     if (config_info.status != SIDETNFS_STATUS_OK)
-        return 0;
+        return config_load_fail("CONFIG_INFO status", -1, config_info.status);
     if (config_info.protocol_version != SIDETNFS_CONFIG_PROTOCOL_VERSION)
-        return 0;
+        return config_load_fail("CONFIG_INFO protocol", -1, config_info.protocol_version);
     if (config_info.max_drives != (unsigned long)MAX_ORDINARY_DRIVES)
-        return 0;
+        return config_load_fail("CONFIG_INFO slot count", -1, config_info.max_drives);
 
     letter = (char)config_info.config_drive_letter;
     if (letter < 'A' || letter > 'Z' || letter == 'A' || letter == 'B')
-        return 0;
+        return config_load_fail("CONFIG_INFO S drive", -1, config_info.config_drive_letter);
 
     memset(&built, 0, sizeof(built));
     built.settings_letter = letter;
 
     for (i = 0; i < MAX_ORDINARY_DRIVES; i++) {
-        if (sidetnfs_probe_get_drive((unsigned long)i, &wire) != SIDETNFS_PROBE_OK)
-            return 0;
+        if ((probe_result = sidetnfs_probe_get_drive((unsigned long)i, &wire)) != SIDETNFS_PROBE_OK)
+            return config_load_fail("GET_DRIVE transport", i, (unsigned long)probe_result);
         if (wire.status != SIDETNFS_STATUS_OK)
-            return 0; /* only an out-of-range index is ever non-OK now -- never sent here */
+            return config_load_fail("GET_DRIVE status", i, wire.status); /* only an out-of-range index is ever non-OK now -- never sent here */
         if (wire.state != SIDETNFS_DRIVE_STATE_EMPTY
             && wire.type != SIDETNFS_DRIVE_TYPE_SD && wire.type != SIDETNFS_DRIVE_TYPE_TNFS)
-            return 0; /* unknown/corrupt type on a configured slot -- never silently treated as TNFS */
+            return config_load_fail("GET_DRIVE type", i, wire.type); /* unknown/corrupt type on a configured slot -- never silently treated as TNFS */
 
         wire_to_ui_drive(&wire, &built.drives[i]);
     }
@@ -920,7 +1183,7 @@ static int dialog_startup_load(DriveConfig *cfg)
 #else
     SideTnfsConfigInfo probe;
     DriveConfig fw_cfg;
-    char msg[100];
+    char msg[200];
 
     if (sidetnfs_probe_get_config_info(&probe) != SIDETNFS_PROBE_OK)
         return 0; /* no firmware detected -- expected offline case, no alert */
@@ -937,7 +1200,8 @@ static int dialog_startup_load(DriveConfig *cfg)
         return 1;
     }
 
-    form_alert(1, "[3][SideTNFS firmware|Unexpected configuration.|Using built-in defaults.][OK]");
+    sprintf(msg, "[3][F32 configuration read failed|%s|Using built-in defaults.][OK]", config_load_failure);
+    form_alert(1, msg);
     return 0;
 #endif
 }
@@ -1550,6 +1814,7 @@ static void cl_editor_run(DriveConfig *cfg)
 {
     short x, y, w, h;
     short which;
+    short wh;
     int done;
     char msg[100];
     char newletter;
@@ -1561,13 +1826,12 @@ static void cl_editor_run(DriveConfig *cfg)
     drv[0] = cfg->settings_letter; drv[1] = '\0';
     set_buf(buf_te_drive, TE_BUF_DRV, drv);
 
-    form_center(cl_dlg, &x, &y, &w, &h);
-    form_dial(FMD_START, x, y, w, h, x, y, w, h);
-    objc_draw(cl_dlg, CL_ROOT, MAX_DEPTH, x, y, w, h);
+    dlg_begin(cl_dlg, "SETTINGS Disk Letter", &wh, &x, &y, &w, &h);
 
     done = 0;
     while (!done) {
-        which = (short)(form_do(cl_dlg, CL_DRIVE_EDIT) & 0x7FFF);
+        which = dlg_form_do(cl_dlg, CL_DRIVE_EDIT, wh);
+        dlg_sync(cl_dlg, &x, &y, &w, &h);
         wait_mouse_release();
 
         switch (which) {
@@ -1596,7 +1860,7 @@ static void cl_editor_run(DriveConfig *cfg)
         }
     }
 
-    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+    dlg_end(wh, x, y, w, h);
 }
 
 /* ================================================================== */
@@ -1713,6 +1977,7 @@ static int sd_editor_run(DriveConfig *cfg, int index)
 {
     short x, y, w, h;
     short which;
+    short wh;
     int done;
     int is_new = drive_slot_is_empty(&cfg->drives[index]);
     Drive working;
@@ -1729,13 +1994,12 @@ static int sd_editor_run(DriveConfig *cfg, int index)
     sd_dialog_init(!is_new);
     sd_load_from_drive(&working, is_new);
 
-    form_center(sd_dlg, &x, &y, &w, &h);
-    form_dial(FMD_START, x, y, w, h, x, y, w, h);
-    objc_draw(sd_dlg, SD_ROOT, MAX_DEPTH, x, y, w, h);
+    dlg_begin(sd_dlg, "SD Drive", &wh, &x, &y, &w, &h);
 
     done = 0;
     while (!done) {
-        which = (short)(form_do(sd_dlg, SD_DRIVE_EDIT) & 0x7FFF);
+        which = dlg_form_do(sd_dlg, SD_DRIVE_EDIT, wh);
+        dlg_sync(sd_dlg, &x, &y, &w, &h);
         wait_mouse_release();
 
         switch (which) {
@@ -1769,7 +2033,7 @@ static int sd_editor_run(DriveConfig *cfg, int index)
         }
     }
 
-    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+    dlg_end(wh, x, y, w, h);
 
     if (done == 2) {
         memset(&cfg->drives[index], 0, sizeof(cfg->drives[index])); /* state == DRIVE_SLOT_EMPTY */
@@ -1944,6 +2208,7 @@ static int tnfs_editor_run(DriveConfig *cfg, int index)
 {
     short x, y, w, h;
     short which;
+    short wh;
     int done;
     int is_new = drive_slot_is_empty(&cfg->drives[index]);
     Drive working;
@@ -1964,13 +2229,12 @@ static int tnfs_editor_run(DriveConfig *cfg, int index)
     te_dialog_init(!is_new);
     te_load_from_drive(&working, is_new);
 
-    form_center(te_dlg, &x, &y, &w, &h);
-    form_dial(FMD_START, x, y, w, h, x, y, w, h);
-    objc_draw(te_dlg, TE_ROOT, MAX_DEPTH, x, y, w, h);
+    dlg_begin(te_dlg, "TNFS Drive", &wh, &x, &y, &w, &h);
 
     done = 0;
     while (!done) {
-        which = (short)(form_do(te_dlg, TE_DRIVE_EDIT) & 0x7FFF);
+        which = dlg_form_do(te_dlg, TE_DRIVE_EDIT, wh);
+        dlg_sync(te_dlg, &x, &y, &w, &h);
         wait_mouse_release();
 
         switch (which) {
@@ -2016,7 +2280,7 @@ static int tnfs_editor_run(DriveConfig *cfg, int index)
         }
     }
 
-    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+    dlg_end(wh, x, y, w, h);
 
     if (done == 2) {
         memset(&cfg->drives[index], 0, sizeof(cfg->drives[index])); /* state == DRIVE_SLOT_EMPTY */
@@ -2041,6 +2305,7 @@ static int add_disk_type_run(void)
     int yt, ydiv1, ybtn;
     short x, y, w, h;
     short which;
+    short wh;
 
     graf_handle(&cw, &ch, &bw, &bh);
     wind_get(0, WF_WORKXYWH, &sx, &sy, &sw, &sh);
@@ -2075,14 +2340,12 @@ static int add_disk_type_run(void)
 
     wire_tree(ad_dlg, AD_NOBJS);
 
-    form_center(ad_dlg, &x, &y, &w, &h);
-    form_dial(FMD_START, x, y, w, h, x, y, w, h);
-    objc_draw(ad_dlg, AD_ROOT, MAX_DEPTH, x, y, w, h);
+    dlg_begin(ad_dlg, "Add disk", &wh, &x, &y, &w, &h);
 
-    which = (short)(form_do(ad_dlg, AD_ROOT) & 0x7FFF);
+    which = dlg_form_do(ad_dlg, AD_ROOT, wh);
     wait_mouse_release();
 
-    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+    dlg_end(wh, x, y, w, h);
 
     (void)sx; (void)sy; (void)sw; (void)bw; (void)bh;
 
@@ -2230,19 +2493,19 @@ static void rtc_editor_run(RtcConfig *rc)
     short x, y, w, h;
     short which;
     short start_obj;
+    short wh;
     int done;
 
     rc_dialog_init();
     rc_load_from_config(rc);
 
-    form_center(rc_dlg, &x, &y, &w, &h);
-    form_dial(FMD_START, x, y, w, h, x, y, w, h);
-    objc_draw(rc_dlg, RC_ROOT, MAX_DEPTH, x, y, w, h);
+    dlg_begin(rc_dlg, "Clock", &wh, &x, &y, &w, &h);
 
     done = 0;
     start_obj = RC_SERVER_EDIT;
     while (!done) {
-        which = (short)(form_do(rc_dlg, start_obj) & 0x7FFF);
+        which = dlg_form_do(rc_dlg, start_obj, wh);
+        dlg_sync(rc_dlg, &x, &y, &w, &h);
         wait_mouse_release();
         start_obj = RC_SERVER_EDIT;
 
@@ -2272,7 +2535,7 @@ static void rtc_editor_run(RtcConfig *rc)
         }
     }
 
-    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+    dlg_end(wh, x, y, w, h);
 }
 
 /* ================================================================== */
@@ -2370,22 +2633,21 @@ static void upd_notice_run(const char *installed, const char *latest)
 {
     short x, y, w, h;
     short which;
+    short wh;
 
     sprintf(buf_upd_line2, "Installed: %-10s  Latest: %-10s", installed, latest);
     buf_upd_line2[UPD_LINE_BUF - 1] = '\0';
 
     upd_dialog_init();
 
-    form_center(upd_dlg, &x, &y, &w, &h);
-    form_dial(FMD_START, x, y, w, h, x, y, w, h);
-    objc_draw(upd_dlg, UPD_ROOT, MAX_DEPTH, x, y, w, h);
+    dlg_begin(upd_dlg, "Firmware Update", &wh, &x, &y, &w, &h);
 
     do {
-        which = (short)(form_do(upd_dlg, UPD_OK) & 0x7FFF);
+        which = dlg_form_do(upd_dlg, UPD_OK, wh);
         wait_mouse_release();
-    } while (which != UPD_OK);
+    } while (which != UPD_OK && which != 0);
 
-    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+    dlg_end(wh, x, y, w, h);
 }
 #endif
 
@@ -2765,19 +3027,19 @@ static void netconfig_editor_run(NetConfig *nc)
     short x, y, w, h;
     short which;
     short start_obj;
+    short wh;
     int done;
 
     nc_dialog_init();
     nc_load_from_config(nc);
 
-    form_center(nc_dlg, &x, &y, &w, &h);
-    form_dial(FMD_START, x, y, w, h, x, y, w, h);
-    objc_draw(nc_dlg, NC_ROOT, MAX_DEPTH, x, y, w, h);
+    dlg_begin(nc_dlg, "Network Settings", &wh, &x, &y, &w, &h);
 
     done = 0;
     start_obj = NC_SSID_EDIT;
     while (!done) {
-        which = (short)(form_do(nc_dlg, start_obj) & 0x7FFF);
+        which = dlg_form_do(nc_dlg, start_obj, wh);
+        dlg_sync(nc_dlg, &x, &y, &w, &h);
         wait_mouse_release();
         start_obj = NC_SSID_EDIT;
 
@@ -2834,7 +3096,7 @@ static void netconfig_editor_run(NetConfig *nc)
         }
     }
 
-    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+    dlg_end(wh, x, y, w, h);
 }
 
 /* ================================================================== */
@@ -3145,18 +3407,18 @@ static void drives_window_run(DriveConfig *cfg)
 {
     short x, y, w, h;
     short which;
+    short wh;
     int done;
 
     ov_dialog_init();
     ov_refresh_rows(cfg);
 
-    form_center(ov_dlg, &x, &y, &w, &h);
-    form_dial(FMD_START, x, y, w, h, x, y, w, h);
-    objc_draw(ov_dlg, OV_ROOT, MAX_DEPTH, x, y, w, h);
+    dlg_begin(ov_dlg, "Drives", &wh, &x, &y, &w, &h);
 
     done = 0;
     while (!done) {
-        which = (short)(form_do(ov_dlg, OV_ROOT) & 0x7FFF);
+        which = dlg_form_do(ov_dlg, OV_ROOT, wh);
+        dlg_sync(ov_dlg, &x, &y, &w, &h);
         wait_mouse_release();
 
         if (which == OV_SETTINGS_BTN) {
@@ -3194,12 +3456,12 @@ static void drives_window_run(DriveConfig *cfg)
         } else if (which == OV_OK) {
             done = 1;
 
-        } else if (which == OV_CANCEL) {
+        } else if (which == OV_CANCEL || which == 0) {
             done = 1;
         }
     }
 
-    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+    dlg_end(wh, x, y, w, h);
 }
 
 /* ================================================================== */
@@ -3251,16 +3513,14 @@ static void sw_dialog_init(void)
     set_obj(sw_dlg, SW_ROOT, G_BOX, NONE, NORMAL, 0, 0, DW, DH);
     sw_dlg[SW_ROOT].ob_spec.index = 0x00031070L;
 
-    /* Version suffix: reuses g_installed_version, captured once at
-     * startup by update_startup_check() from the same CHECK_UPDATE
-     * round-trip the update-notice dialog uses -- no second command, no
-     * second source of truth. Left off entirely (falls back to the
-     * plain title) when that check never got a response. */
+    /* PRG tag is always present so Falcon testers can see whether S:
+     * served this binary. Firmware version is appended only when
+     * CHECK_UPDATE actually answered. */
     if (g_installed_version[0] != '\0') {
-        sprintf(sw_title_buf, "SIDETNFS Configuration %s", g_installed_version);
+        sprintf(sw_title_buf, "SIDETNFS %s %s", SIDETNFS_PRG_VERSION, g_installed_version);
         sw_title_buf[SW_TITLE_BUF - 1] = '\0';
     } else {
-        strcpy(sw_title_buf, "SIDETNFS Configuration");
+        sprintf(sw_title_buf, "SIDETNFS %s", SIDETNFS_PRG_VERSION);
     }
     {
         int title_chars = (int)strlen(sw_title_buf);
@@ -3746,6 +4006,7 @@ static short sw_form_do_ticking(void)
     short msg[8];
     short event, obj, next;
     short result = SW_QUIT;
+    short wx, wy, ww, wh;
     int running = 1;
 
     while (running) {
@@ -3759,6 +4020,22 @@ static short sw_form_do_ticking(void)
                            msg,
                            (unsigned long)SW_CLOCK_TICK_MS,
                            &mx, &my, &mb, &ks, &kr, &br);
+
+        if ((event & MU_MESAG) && g_sw_wh >= 0 && msg[3] == g_sw_wh) {
+            if (msg[0] == WM_REDRAW) {
+                win_redraw_tree(g_sw_wh, sw_dlg, msg);
+            } else if (msg[0] == WM_TOPPED) {
+                wind_set(g_sw_wh, WF_TOP, 0, 0, 0, 0);
+            } else if (msg[0] == WM_MOVED) {
+                wind_set(g_sw_wh, WF_CURRXYWH, msg[4], msg[5], msg[6], msg[7]);
+                wind_get(g_sw_wh, WF_WORKXYWH, &wx, &wy, &ww, &wh);
+                sw_dlg[SW_ROOT].ob_x = wx;
+                sw_dlg[SW_ROOT].ob_y = wy;
+            } else if (msg[0] == WM_CLOSED) {
+                result = SW_QUIT;
+                running = 0;
+            }
+        }
 
         if (event & MU_TIMER) {
             if (status_clock_tick())
@@ -3856,14 +4133,13 @@ void dialog_run(DriveConfig *cfg)
     sw_dialog_init();
     status_window_refresh(cfg);
 
-    form_center(sw_dlg, &x, &y, &w, &h);
-    form_dial(FMD_START, x, y, w, h, x, y, w, h);
-    objc_draw(sw_dlg, SW_ROOT, MAX_DEPTH, x, y, w, h);
+    dlg_begin(sw_dlg, sw_title_buf, &g_sw_wh, &x, &y, &w, &h);
 
     done = 0;
     while (!done) {
         which = sw_form_do_ticking();
         wait_mouse_release();
+        dlg_sync(sw_dlg, &x, &y, &w, &h);
 
         switch (which) {
         case SW_CONFIG:
@@ -3916,5 +4192,6 @@ void dialog_run(DriveConfig *cfg)
         }
     }
 
-    form_dial(FMD_FINISH, x, y, w, h, x, y, w, h);
+    dlg_end(g_sw_wh, x, y, w, h);
+    g_sw_wh = -1;
 }

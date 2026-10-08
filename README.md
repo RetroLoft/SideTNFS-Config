@@ -119,6 +119,12 @@ make clean
 
 Transfer `SIDETNFS.PRG` to an Atari ST (or emulator such as Hatari) and run from the GEM desktop.
 
+On a **Falcon 16-bit cart**, the tool must send shifted dummy reads at
+`$7E00+(byte<<1)` (same window as GEMDRIVE/SideETH). A copy that still
+dummy-reads `0..510` times out with “SideTNFS firmware not responding”.
+That fix is in `src/sidetnfs_probe.c` (`f952f5b`) and the firmware
+SETTINGS embed (v58).
+
 ## Configuration source of truth
 
 There is no local config file. On startup the tool tries to detect
@@ -218,3 +224,7 @@ before cutting a release:
    [Release assets](#release-assets) above), then regenerate
    `sidetnfs_config_drive.c` from that release (running the script with no
    `--prg`/`--readme`) before committing it in the firmware repo.
+
+## Native F36/F37 integration candidate
+
+See [the coordinated submission notes](docs/F36-UPSTREAM.md) for scope, companion repositories, build requirements and hardware validation limits.
