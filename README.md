@@ -224,7 +224,3 @@ before cutting a release:
    [Release assets](#release-assets) above), then regenerate
    `sidetnfs_config_drive.c` from that release (running the script with no
    `--prg`/`--readme`) before committing it in the firmware repo.
-
-## Native F36/F37 integration candidate
-
-See [the coordinated submission notes](docs/F36-UPSTREAM.md) for scope, companion repositories, build requirements and hardware validation limits.
