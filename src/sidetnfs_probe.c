@@ -1,3 +1,4 @@
+#include "cart_wire.h"
 /*
  * Fase AC-4: SideTNFS config-protocol -- GET_CONFIG_INFO
  * (0x040D), GET_DRIVE (0x040E), SET_DRIVE (0x040F), DELETE_DRIVE
@@ -52,6 +53,11 @@
  *     -- the proven 68k-side random-token handshake AND the proven
  *     string-block send mechanism, both reused verbatim below)
  *
+ * F32: ST/STE and Falcon use header 0xA5A5 and two addresses in the
+ * reserved 0x7E00..0x7FFE window per word. Raw ST words collided with
+ * native GEMDRIVE/SIDEETH endpoints. This also avoids Falcon A0 loss.
+ * CPU-specific cache handling is independent of this encoding.
+ *
  * Byte-order summary (unchanged reasoning from Fase AC-1/AC-2, extended
  * to the new write commands):
  *   - uint32_t fields (WRITE_AND_SWAP_LONGWORD on the Pico side): a
@@ -83,6 +89,17 @@
 
 #define ROM3_BASE            0xFB0000UL
 #define ROM3_PROTOCOL_HEADER 0xABCDUL /* CMD_MAGIC_NUMBER, gemdrive.s */
+/* Falcon 16-bit cart drops A0, so 0xABCD arrives as 0xABCC and odd
+ * command IDs collide (GET_NETWORK 0x0413 -> SAVE_CONFIG 0x0412). After
+ * GEMDRIVE's first PING, Pico accepts PROTOCOL_HEADER_SHIFTED (tprotocol.h)
+ * plus two dummy reads of ROM3_SHIFT_WINDOW+(byte<<1) per protocol word.
+ * ST keeps the 0xABCD path so older UF2s still work. Must match
+ * PROTOCOL_SHIFT_WINDOW in firmware tprotocol.h / SideETH cart.h. */
+#define ROM3_PROTOCOL_HEADER_SHIFTED 0xA5A5UL
+#define ROM3_SHIFT_WINDOW            0x7E00UL
+#define COOKIE_JAR_PTR ((volatile long **)0x5A0L)
+#define COOKIE_MCH     0x5F4D4348UL /* '_MCH' */
+#define MCH_FALCON_HI  3UL          /* (_MCH >> 16) == 3 */
 
 #define CMD_GET_CONFIG_INFO     0x040DUL
 #define CMD_GET_DRIVE           0x040EUL
@@ -243,6 +260,76 @@ static unsigned long rom3_read_long(unsigned long offset)
     return *((volatile unsigned long *)(ROM3_BASE + offset));
 }
 
+/* _MCH lives in the cookie jar at $5A0, which is supervisor-only on
+ * 68000. Falcon TOS 4 is 0x00030000. Cached: Supexec once per run. */
+static long read_mch_super(void)
+{
+    long *jar = (long *)*COOKIE_JAR_PTR;
+
+    if (jar == 0)
+        return 0;
+    while (jar[0] != 0) {
+        if ((unsigned long)jar[0] == COOKIE_MCH)
+            return jar[1];
+        jar += 2;
+    }
+    return 0;
+}
+
+int sidetnfs_probe_is_falcon(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = (((unsigned long)Supexec(read_mch_super) >> 16) == MCH_FALCON_HI) ? 1 : 0;
+    return cached;
+}
+
+/* CPU identification is independent of the wire encoding. No MOVEC on
+ * a 68000, or on an accelerated Falcon with a different cache layout. */
+static long read_cpu_super(void)
+{
+    long *jar = (long *)*COOKIE_JAR_PTR;
+    if (jar == 0) return -1;
+    while (jar[0] != 0) {
+        if ((unsigned long)jar[0] == 0x5F435055UL) return jar[1]; /* _CPU */
+        jar += 2;
+    }
+    return -1;
+}
+static int cart_needs_030_cache(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+        cached = config_needs_030_cache((unsigned long)Supexec(read_mch_super),
+                                       (unsigned long)Supexec(read_cpu_super));
+    return cached;
+}
+
+/* All machines use the disjoint window; neither payload nor random token
+ * halves may be interpreted as another endpoint's trigger/read address. */
+static void send_wire_word(unsigned long word)
+{
+    unsigned int w = (unsigned int)(word & 0xFFFFUL);
+    (void)rom3_read(config_wire_byte(w >> 8));
+    (void)rom3_read(config_wire_byte(w));
+}
+
+/* 68030 D-cache: ROM3 token polls must see Pico writes. Supervisor
+ * only (movec CACR). CD is bit 11; bit 3 would clear instructions.
+ * The read/OR/write preserves cache enable/freeze settings. ST must not run this. */
+static long flush_030_dcache_super(void)
+{
+    __asm__ __volatile__(
+        ".word 0x4E7A, 0x0002\n\t"
+        "ori.l #0x00000800,%%d0\n\t"
+        ".word 0x4E7B, 0x0002"
+        :
+        :
+        : "d0", "cc", "memory");
+    return 0;
+}
+
 /* Bounded Vsync() poll for the firmware to echo `seed` back at
  * RANDOM_TOKEN_OFFSET. Returns 1 on match, 0 on timeout. */
 static int wait_for_token(unsigned long seed, int timeout_sec)
@@ -254,6 +341,8 @@ static int wait_for_token(unsigned long seed, int timeout_sec)
     echoed = ~seed; /* force a mismatch before the first check */
     while (budget > 0 && echoed != seed) {
         Vsync();
+        if (cart_needs_030_cache())
+            (void)Supexec(flush_030_dcache_super);
         echoed = rom3_read_long(RANDOM_TOKEN_OFFSET);
         budget--;
     }
@@ -267,14 +356,17 @@ static int wait_for_token(unsigned long seed, int timeout_sec)
  * wait_for_token(). total_payload_bytes excludes the token. */
 static unsigned long send_command_start(unsigned long command, unsigned long total_payload_bytes)
 {
-    unsigned long seed = rom3_read_long(RANDOM_TOKEN_SEED_OFFSET);
+    unsigned long seed;
 
-    (void)rom3_read(ROM3_PROTOCOL_HEADER);
-    (void)rom3_read(command);
-    (void)rom3_read(total_payload_bytes + 4UL);
+    if (cart_needs_030_cache())
+        (void)Supexec(flush_030_dcache_super);
+    seed = rom3_read_long(RANDOM_TOKEN_SEED_OFFSET);
 
-    (void)rom3_read(seed & 0xFFFFUL);
-    (void)rom3_read((seed >> 16) & 0xFFFFUL);
+    (void)rom3_read(CONFIG_WIRE_HEADER);
+    send_wire_word(command);
+    send_wire_word(total_payload_bytes + 4UL);
+    send_wire_word(seed & 0xFFFFUL);
+    send_wire_word((seed >> 16) & 0xFFFFUL);
 
     return seed;
 }
@@ -283,15 +375,15 @@ static unsigned long send_command_start(unsigned long command, unsigned long tot
  * GET_PAYLOAD_PARAM32). */
 static void send_param32(unsigned long value)
 {
-    (void)rom3_read(value & 0xFFFFUL);
-    (void)rom3_read((value >> 16) & 0xFFFFUL);
+    send_wire_word(value & 0xFFFFUL);
+    send_wire_word((value >> 16) & 0xFFFFUL);
 }
 
 /* One 16-bit request parameter: a single raw-value read (matches
  * GET_PAYLOAD_PARAM16 = payload[0], no reassembly). */
 static void send_param16(unsigned long value)
 {
-    (void)rom3_read(value & 0xFFFFUL);
+    send_wire_word(value & 0xFFFFUL);
 }
 
 /* A fixed-length string field, sent two raw source bytes at a time,
@@ -307,7 +399,7 @@ static void send_string_field(const char *s, int len)
     for (i = 0; i < len; i += 2) {
         b0 = (unsigned char)s[i];
         b1 = (unsigned char)s[i + 1];
-        (void)rom3_read(((unsigned long)b0 << 8) | (unsigned long)b1);
+        send_wire_word(((unsigned long)b0 << 8) | (unsigned long)b1);
     }
 }
 

@@ -2,8 +2,8 @@ SideTNFS Settings Disk
 ======================
 
 Firmware release    : v1.0.3
-Settings tool       : SIDETNFS.PRG
-Document date       : 2026-08-20
+Settings tool       : SIDETNFS.PRG f37-a1
+Document date       : 2026-10-08
 
 Official website:
   https://retroloft.net/sidetnfs

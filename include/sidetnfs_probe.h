@@ -191,6 +191,9 @@ typedef struct {
 
 int sidetnfs_probe_check_update(SideTnfsUpdateCheck *info);
 
+/* 1 if the cookie jar's _MCH high word is 3 (Falcon). Cached. */
+int sidetnfs_probe_is_falcon(void);
+
 /* Live RTC/NTP synchronisation state, as opposed to the stored settings
  * GET_RTC_CONFIG returns. Read straight from the two status longs the
  * Pico publishes in the ROM3 exchange area and the GEMDRIVE ROM already
