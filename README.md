@@ -6,7 +6,7 @@
 
 SideTNFS is a cartridge for the Atari ST family that emulates a GEMDOS hard drive over WiFi (TNFS) or a microSD card, using a Raspberry Pi Pico. The Pico has no screen or keyboard of its own, so it needs some other way to be configured — that's what this program is for.
 
-Every SideTNFS cartridge always exposes a small, read-only **SETTINGS disk** (default drive `S:`), even on a Pico that has never seen a network or an SD card. That disk contains exactly two files: `README.TXT` and **`SIDETNFS.PRG`**, the GEM application built from this repository. Run it from the Atari desktop and it talks directly to the running firmware over the cartridge's own ROM3 bus — there is no local config file anywhere — to add, edit, enable/disable, or remove TNFS/SD drives, change WiFi settings, and set the clock/NTP timezone. Save writes straight to the Pico's internal flash; changes take effect once the Sidecart restarts.
+Every SideTNFS cartridge always exposes a small, read-only **SETTINGS disk** (default drive `I:`), even on a Pico that has never seen a network or an SD card. That disk contains exactly two files: `README.TXT` and **`SIDETNFS.PRG`**, the GEM application built from this repository. Run it from the Atari desktop and it talks directly to the running firmware over the cartridge's own ROM3 bus — there is no local config file anywhere — to add, edit, enable/disable, or remove TNFS/SD drives, change WiFi settings, and set the clock/NTP timezone. Save writes straight to the Pico's internal flash; changes take effect once the Sidecart restarts.
 
 Because the SETTINGS disk has to be there and usable from the very first boot — before any drive, network, or storage backend exists to read files from — its contents can't be loaded from a filesystem at startup the way a normal TNFS or SD drive's files are. Instead, `SideTNFS-Firmware` compiles `SIDETNFS.PRG` (and `README.TXT`) directly into its own firmware image, as a `const uint8_t[]` array baked into flash, and serves that memory back to the Atari through a small, read-only, root-only virtual-drive backend — no RAM copy, no SD/WiFi access, nothing ever written back to it. In other words: **this repository is where the tool is developed and released, but a build of it only ever reaches a real cartridge by being embedded into that other project's firmware binary.**
 
@@ -138,7 +138,8 @@ to and reports a clear error instead.
 `SIDETNFS.PRG` configures SideTNFS.
 
 - The **SETTINGS disk** is always present and read-only; its default
-  drive letter is `S:`.
+  drive letter is `I:`. The original TOS only knows A: to P:,
+  so `SIDETNFS.PRG` warns when a drive letter after P: is chosen.
 - Up to eight ordinary TNFS/SD drives can be configured, each
   **Active** or **Inactive**. Setting a drive to Inactive keeps its full
   configuration -- it is simply not published as a GEMDOS drive.

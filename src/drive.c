@@ -21,7 +21,7 @@ void drive_config_init_defaults(DriveConfig *cfg)
     Drive *d;
 
     memset(cfg, 0, sizeof(*cfg));
-    cfg->settings_letter = 'S';
+    cfg->settings_letter = 'I';
 
     d = &cfg->drives[0];
     d->state     = DRIVE_SLOT_ENABLED;

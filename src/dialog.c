@@ -262,7 +262,7 @@ static OBJECT pw_dlg[PW_NOBJS];
 /* Reused across CL/SD/TE editors (never open simultaneously). Sized to */
 /* the firmware-agreed field lengths in drive.h.                       */
 /* ================================================================== */
-#define TE_BUF_DRV    3
+#define TE_BUF_DRV    2   /* one letter, see form_do_letter() */
 #define TE_BUF_NICK   DRIVE_NICK_LEN   /* 24 */
 #define TE_BUF_HOST   DRIVE_HOST_LEN   /* 64 */
 #define TE_BUF_PORT   7
@@ -597,6 +597,98 @@ static void shared_fields_init(void)
 }
 
 /* ================================================================== */
+/* form_do() with a drive letter field: there a typed letter replaces  */
+/* the one that is there, in capitals, instead of being added after it */
+/* (GEM's own editing). Other fields and buttons work as in form_do(). */
+/* ================================================================== */
+static short form_do_letter(OBJECT *tree, short start, short letter_obj)
+{
+    short edit_obj = start, next_obj = 0, idx = 0, cont = 1;
+    short mx, my, mb, ks, kr, br, msg[8];
+    objc_edit(tree, edit_obj, 0, &idx, ED_INIT);
+    while (cont) {
+        short ev = evnt_multi(MU_KEYBD | MU_BUTTON, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                              msg, 0L, &mx, &my, &mb, &ks, &kr, &br);
+        if (ev & MU_KEYBD) {
+            char c = (char)(kr & 0xff);
+            if (edit_obj == letter_obj && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+                char *text = tree[edit_obj].ob_spec.tedinfo->te_ptext;
+                short x, y;
+                objc_edit(tree, edit_obj, 0, &idx, ED_END);
+                text[0] = (char)(c >= 'a' ? c - 'a' + 'A' : c);
+                text[1] = '\0';
+                objc_offset(tree, edit_obj, &x, &y);
+                objc_draw(tree, edit_obj, 0, x - 2, y - 2,
+                          tree[edit_obj].ob_width + 4, tree[edit_obj].ob_height + 4);
+                objc_edit(tree, edit_obj, 0, &idx, ED_INIT);
+                continue;
+            }
+            if (edit_obj == letter_obj && c > ' ' && c != 127)
+                continue;                   /* only letters there */
+            cont = form_keybd(tree, edit_obj, next_obj, kr, &next_obj, &kr);
+            if (kr)
+                objc_edit(tree, edit_obj, kr, &idx, ED_CHAR);
+        }
+        if (ev & MU_BUTTON) {
+            next_obj = objc_find(tree, ROOT, MAX_DEPTH, mx, my);
+            if (next_obj == -1)
+                next_obj = 0;
+            else
+                cont = form_button(tree, next_obj, br, &next_obj);
+        }
+        if (!cont || (next_obj != 0 && next_obj != edit_obj))
+            objc_edit(tree, edit_obj, 0, &idx, ED_END);
+        if (cont && next_obj != 0 && next_obj != edit_obj) {
+            edit_obj = next_obj;
+            next_obj = 0;
+            objc_edit(tree, edit_obj, 0, &idx, ED_INIT);
+        }
+    }
+    return next_obj;
+}
+
+/* ================================================================== */
+/* Drive letters Q: to Z:: the original TOS (GEMDOS) only knows A: to  */
+/* P:. MiNT, MagiC and EmuTOS know A: to Z:. The letter belongs to the */
+/* cartridge, which may go into another Atari, so it is allowed, with  */
+/* a warning that says what this Atari runs.                           */
+/* ================================================================== */
+static long os_kind_value;              /* 0 TOS, 1 MiNT, 2 MagiC, 3 EmuTOS */
+static unsigned short os_tos_version;
+
+static long os_detect(void)
+{
+    long *jar = *(long **)0x5a0L;
+    const unsigned char *hdr = *(const unsigned char **)0x4f2L;  /* _sysbase */
+    os_kind_value = 0;
+    for (; jar && jar[0]; jar += 2) {
+        if (jar[0] == 0x4D694E54L) { os_kind_value = 1; return 0; }     /* 'MiNT' */
+        if (jar[0] == 0x4D616758L) { os_kind_value = 2; return 0; }     /* 'MagX' */
+    }
+    hdr = *(const unsigned char * const *)(hdr + 8);                   /* os_beg: the ROM header */
+    os_tos_version = (unsigned short)(hdr[2] << 8 | hdr[3]);
+    if (hdr[0x2c] == 'E' && hdr[0x2d] == 'T' && hdr[0x2e] == 'O' && hdr[0x2f] == 'S')
+        os_kind_value = 3;
+    return 0;
+}
+
+/* 1: keep the letter, 0: choose another */
+static int letter_ok_for_tos(char letter)
+{
+    char msg[200];
+    if (letter <= 'P')
+        return 1;
+    Supexec(os_detect);
+    if (os_kind_value == 0)
+        sprintf(msg, "[2][Drive %c: needs MiNT, MagiC|or EmuTOS. This Atari runs|TOS %x.%02x, which only knows|A: to P:: copying folders|there goes wrong.][Use %c:|Change]",
+                letter, os_tos_version >> 8, os_tos_version & 0xff, letter);
+    else
+        sprintf(msg, "[1][Drive %c: works with MiNT,|MagiC and EmuTOS. The|original TOS only knows|A: to P:.][Use %c:|Change]",
+                letter, letter);
+    return form_alert(2, msg) == 1;
+}
+
+/* ================================================================== */
 /* Shared drive validation -- used both by each editor's Test/OK and by */
 /* Save's full-list check. msg must be at least 100 bytes.             */
 /* ================================================================== */
@@ -905,7 +997,7 @@ static int dialog_startup_load(DriveConfig *cfg)
      * notes at the top of this file. firmware_backed=1 so Save/Restart
      * behave like a real, working unit for the recording. */
     memset(cfg, 0, sizeof(*cfg));
-    cfg->settings_letter = 'S';
+    cfg->settings_letter = 'I';
 
     cfg->drives[0].state     = DRIVE_SLOT_ENABLED;
     cfg->drives[0].letter    = 'N';
@@ -1567,7 +1659,7 @@ static void cl_editor_run(DriveConfig *cfg)
 
     done = 0;
     while (!done) {
-        which = (short)(form_do(cl_dlg, CL_DRIVE_EDIT) & 0x7FFF);
+        which = (short)(form_do_letter(cl_dlg, CL_DRIVE_EDIT, CL_DRIVE_EDIT) & 0x7FFF);
         wait_mouse_release();
 
         switch (which) {
@@ -1586,6 +1678,8 @@ static void cl_editor_run(DriveConfig *cfg)
                 form_alert(1, msg);
                 break;
             }
+            if (!letter_ok_for_tos(newletter))
+                break;
             cfg->settings_letter = newletter;
             done = 1;
             break;
@@ -1735,7 +1829,7 @@ static int sd_editor_run(DriveConfig *cfg, int index)
 
     done = 0;
     while (!done) {
-        which = (short)(form_do(sd_dlg, SD_DRIVE_EDIT) & 0x7FFF);
+        which = (short)(form_do_letter(sd_dlg, SD_DRIVE_EDIT, SD_DRIVE_EDIT) & 0x7FFF);
         wait_mouse_release();
 
         switch (which) {
@@ -1758,6 +1852,8 @@ static int sd_editor_run(DriveConfig *cfg, int index)
                 form_alert(1, msg);
                 break;
             }
+            if (!letter_ok_for_tos(working.letter))
+                break;
             cfg->drives[index] = working;
             done = 1;
             break;
@@ -1970,7 +2066,7 @@ static int tnfs_editor_run(DriveConfig *cfg, int index)
 
     done = 0;
     while (!done) {
-        which = (short)(form_do(te_dlg, TE_DRIVE_EDIT) & 0x7FFF);
+        which = (short)(form_do_letter(te_dlg, TE_DRIVE_EDIT, TE_DRIVE_EDIT) & 0x7FFF);
         wait_mouse_release();
 
         switch (which) {
@@ -2005,6 +2101,8 @@ static int tnfs_editor_run(DriveConfig *cfg, int index)
                 form_alert(1, msg);
                 break;
             }
+            if (!letter_ok_for_tos(working.letter))
+                break;
             cfg->drives[index] = working;
             done = 1;
             break;

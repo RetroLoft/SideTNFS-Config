@@ -58,7 +58,7 @@ typedef struct {
 
 typedef struct {
     Drive drives[MAX_DRIVES]; /* fixed slots 0..7, never compacted/sorted */
-    char  settings_letter;    /* SETTINGS disk drive letter, e.g. 'S' -- always active, not part of drives[] */
+    char  settings_letter;    /* SETTINGS disk drive letter, e.g. 'I' -- always active, not part of drives[] */
 } DriveConfig;
 
 /* Single source of truth for the three-state semantics -- never compare
@@ -68,7 +68,7 @@ int drive_slot_is_empty(const Drive *d);
 int drive_slot_is_configured(const Drive *d); /* DISABLED or ENABLED */
 int drive_slot_is_enabled(const Drive *d);
 
-/* Builds the built-in defaults: SETTINGS letter 'S', slot 0 the
+/* Builds the built-in defaults: SETTINGS letter 'I', slot 0 the
  * RetroLoft TNFS drive (ENABLED), slots 1-7 EMPTY. */
 void drive_config_init_defaults(DriveConfig *cfg);
 
