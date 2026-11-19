@@ -1,9 +1,9 @@
 SideTNFS Settings Disk
 ======================
 
-Firmware release    : v1.0.3
+Firmware release    : v1.2.0
 Settings tool       : SIDETNFS.PRG
-Document date       : 2026-08-20
+Document date       : 2026-11-19
 
 Official website:
   https://retroloft.net/sidetnfs
@@ -37,7 +37,6 @@ Settings are stored inside the Pico's internal flash memory.
 PLANNED FEATURES
 ----------------
 
-  * Floppy drive emulation
   * Advanced RTC with time zone support
   * Atari Falcon support (where technically possible)
 
